@@ -21,14 +21,14 @@ test:
 	@go test -race -count=2 -tags="rabbit" ./...
 
 coverage:
-	@go test -count=2 -race -coverprofile=./coverage -tags="rabbit" ./...
+	@go test -count=2 -race -coverprofile=./.coverage -tags="rabbit" ./...
 
 coverage-html:
-	@rm ./coverage || true
+	@rm ./.coverage || true
 	@$(MAKE) coverage
-	@go tool cover -html=./coverage -o ./coverage.html
+	@go tool cover -html=./.coverage -o ./coverage.html
 
 coverage-browser:
-	@rm ./coverage || true
+	@rm ./.coverage || true
 	@$(MAKE) coverage
-	@go tool cover -html=./coverage
+	@go tool cover -html=./.coverage
