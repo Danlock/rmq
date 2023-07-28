@@ -16,12 +16,15 @@ type ConsumerConfig struct {
 	Queue    ConsumerQueue
 	Bindings []ConsumerBinding
 	Consume  ConsumerConsume
+	Qos      ConsumerQos
 
 	// AMQPTimeout sets a timeout on all AMQP requests.
 	// Defaults to 30 seconds.
 	AMQPTimeout time.Duration
 	// Set Logf with your favorite logging library
 	Logf func(msg string, args ...any)
+	// Process*Backoff controls how frequently Process retries on errors. Defaults from 125 ms to 32 seconds.
+	ProcessMinBackoff, ProcessMaxBackoff time.Duration
 }
 
 // ConsumerExchange are args for amqp.Channel.ExchangeDeclare
@@ -55,7 +58,7 @@ type ConsumerBinding struct {
 	Args         amqp.Table
 }
 
-// ConsumerBinding are args for amqp.Channel.Consume
+// ConsumerConsume are args for amqp.Channel.Consume
 type ConsumerConsume struct {
 	AutoAck   bool
 	Consumer  string
@@ -65,10 +68,19 @@ type ConsumerConsume struct {
 	Args      amqp.Table
 }
 
+// ConsumerQos are args for amqp.Channel.Qos
+type ConsumerQos struct {
+	PrefetchCount int
+	PrefetchSize  int
+	Global        bool
+}
+
 type RMQConsumer struct {
 	config ConsumerConfig
 }
 
+// NewConsumer creates an RMQConsumer to be used to pull messages from a RabbitMQ queue.
+// A RMQConsumer contains all the information needed to repeatedly redeclare a RabbitMQ consumer in case of errors.
 func NewConsumer(config ConsumerConfig) *RMQConsumer {
 	if config.AMQPTimeout == 0 {
 		config.AMQPTimeout = 30 * time.Second
@@ -76,12 +88,19 @@ func NewConsumer(config ConsumerConfig) *RMQConsumer {
 	if config.Logf == nil {
 		config.Logf = func(msg string, args ...any) {}
 	}
+	if config.ProcessMinBackoff == 0 {
+		config.ProcessMinBackoff = time.Second / 8
+	}
+	if config.ProcessMaxBackoff == 0 {
+		config.ProcessMaxBackoff = 32 * time.Second
+	}
 	return &RMQConsumer{config: config}
 }
 
 // Declare will declare an exchange, queue, bindings in preparation for a future Consume call.
 // Only closes the channel on errors.
 func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection) (_ *amqp.Channel, err error) {
+	logPrefix := "RMQConsumer.Declare for queue %s"
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.config.AMQPTimeout)
@@ -90,13 +109,13 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection)
 
 	mqChan, err := rmqConn.Channel(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("RMQConsumer.Declare failed to get a channel for queue %s", c.config.Queue.Name)
+		return nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", c.config.Queue.Name, err)
 	}
 	defer func() {
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf("RMQConsumer.Declare got an error while closing the amqp.Channel. err %+v", mqChanErr)
+				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", c.config.Queue.Name, mqChanErr)
 			}
 		}
 	}()
@@ -141,7 +160,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection)
 		}
 
 		if err != nil {
-			err = fmt.Errorf("RMQConsumer.Declare failed to declare exchange %s %w", c.config.Exchange.Name, err)
+			err = fmt.Errorf(logPrefix+" failed to declare exchange %s due to %w", c.config.Queue.Name, c.config.Exchange.Name, err)
 			return
 		}
 
@@ -165,7 +184,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection)
 			)
 		}
 		if err != nil {
-			err = fmt.Errorf("RMQConsumer.Declare failed to declare queue %s %w", c.config.Queue.Name, err)
+			err = fmt.Errorf(logPrefix+" failed to declare queue due to %w", c.config.Queue.Name, err)
 			return
 		}
 
@@ -179,12 +198,20 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection)
 			)
 			if err != nil {
 				err = fmt.Errorf(
-					"RMQConsumer.Declare unable to bind queue '%s' to exchange '%s' via key '%s' %w",
+					logPrefix+" unable to bind queue to exchange '%s' via key '%s' due to %w",
 					queue.Name,
 					b.ExchangeName,
 					b.RoutingKey,
 					err,
 				)
+				return
+			}
+		}
+
+		if c.config.Qos != (ConsumerQos{}) {
+			err = mqChan.Qos(c.config.Qos.PrefetchCount, c.config.Qos.PrefetchSize, c.config.Qos.Global)
+			if err != nil {
+				err = fmt.Errorf(logPrefix+" unable to set prefetch due to %w", queue.Name, err)
 				return
 			}
 		}
@@ -195,18 +222,19 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection)
 		go func() {
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
-			c.config.Logf("RMQConsumer.Declare completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
+			c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", c.config.Queue.Name, time.Since(start), r.err)
 		}()
-		return nil, fmt.Errorf("RMQConsumer.Declare context ended before it finished %w", context.Cause(ctx))
+		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", c.config.Queue.Name, context.Cause(ctx))
 	case r := <-respChan:
-		// Set our consumer's queue name in case of an anonymous queue
+		// Set our consumer's queue name in case of an anonymous queue which would have left c.Config.Queue.Name blank
 		c.config.Queue.Name = r.queue.Name
 		return mqChan, r.err
 	}
 }
 
-// Consume will start consuming from the previously declared queue. Only closes the channel on errors.
+// Consume will start consuming from the previously declared queue. Only closes mqChan on errors.
 func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-chan amqp.Delivery, err error) {
+	logPrefix := "RMQConsumer.Consume for queue %s"
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.config.AMQPTimeout)
@@ -217,7 +245,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf("RMQConsumer.Declare got an error while closing the amqp.Channel. err %+v", mqChanErr)
+				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", c.config.Queue.Name, mqChanErr)
 			}
 		}
 	}()
@@ -247,10 +275,84 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 		go func() {
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
-			c.config.Logf("RMQConsumer.Consume completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
+			if r.err != nil {
+				c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", c.config.Queue.Name, time.Since(start), r.err)
+			}
 		}()
-		return nil, fmt.Errorf("RMQConsumer.Consume context ended before it finished %w", context.Cause(ctx))
+		return nil, fmt.Errorf(logPrefix+" context ended before it finished due to %w", c.config.Queue.Name, context.Cause(ctx))
 	case r := <-respChan:
 		return r.deliveries, r.err
+	}
+}
+
+func calcDelay(min, max, current time.Duration) time.Duration {
+	if current == 0 {
+		return min
+	} else if current < max {
+		return current * 2
+	} else {
+		return max
+	}
+}
+
+// Process uses the RMQConsumer config to repeatedly Declare and Consume from an AMQP queue, processing each message concurrently with deliveryProcessor.
+// Because a goroutine is span up for each message, ConsumerQos must be set if this function is being used to provide an upper bound.
+// A default prefetch count (and max goroutine count) of 2000 is used by Process if ConsumerQos isn't set.
+// On any error Process will reconnect to AMQP, redeclare it's topology and resume consumption of messages.
+// Blocks until it's context is finished, upon which it will return with an error describing why the context finished.
+func (c *RMQConsumer) Process(ctx context.Context, rmqConn redial.RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) (err error) {
+	logPrefix := "RMQConsumer.Process for queue %s"
+	if c.config.Qos == (ConsumerQos{}) {
+		c.config.Qos.PrefetchCount = 2000
+	}
+	var delay time.Duration
+	for {
+		select {
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		case <-time.After(delay):
+		}
+
+		mqChan, err := c.Declare(ctx, rmqConn)
+		if err != nil {
+			delay = calcDelay(c.config.ProcessMinBackoff, c.config.ProcessMaxBackoff, delay)
+			c.config.Logf(logPrefix+" failed to Declare. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
+			continue
+		}
+
+		msgChan, err := c.Consume(ctx, mqChan)
+		if err != nil {
+			delay = calcDelay(c.config.ProcessMinBackoff, c.config.ProcessMaxBackoff, delay)
+			c.config.Logf(logPrefix+" failed to Consume. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
+			continue
+		}
+		// Successfully redeclared our topology, so reset the backoff
+		delay = 0
+
+		c.processDeliveries(ctx, mqChan, msgChan, deliveryProcessor)
+	}
+}
+
+func (c *RMQConsumer) processDeliveries(ctx context.Context, mqChan *amqp.Channel, msgChan <-chan amqp.Delivery, processor func(ctx context.Context, msg amqp.Delivery)) {
+	logPrefix := "RMQConsumer.processDeliveries for queue %s"
+	closeNotifier := mqChan.NotifyClose(make(chan *amqp.Error, 2))
+	for {
+		select {
+		case <-ctx.Done():
+			if err := mqChan.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
+				c.config.Logf(logPrefix+" failed to Close it's AMQP channel due to %v", c.config.Queue.Name, err)
+				// Typically we exit processDeliveries by waiting for the msgChan to close, but if we can't close the mqChan then abandon ship
+				return
+			}
+		case err := <-closeNotifier:
+			if err != nil {
+				c.config.Logf(logPrefix+" got an AMQP Channel Close error %+v", c.config.Queue.Name, err)
+			}
+		case msg, ok := <-msgChan:
+			if !ok {
+				return
+			}
+			go processor(ctx, msg)
+		}
 	}
 }
