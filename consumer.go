@@ -1,4 +1,4 @@
-package pubsub
+package rmq
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/danlock/rmq/redial"
+	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -23,8 +23,8 @@ type ConsumerConfig struct {
 	AMQPTimeout time.Duration
 	// Set Logf with your favorite logging library
 	Logf func(msg string, args ...any)
-	// Process*Backoff controls how frequently Process retries on errors. Defaults from 125 ms to 32 seconds.
-	ProcessMinBackoff, ProcessMaxBackoff time.Duration
+	// *RetryInterval controls how frequently RMQConsumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
+	MinRetryInterval, MaxRetryInterval time.Duration
 }
 
 // ConsumerExchange are args for amqp.Channel.ExchangeDeclare
@@ -88,18 +88,18 @@ func NewConsumer(config ConsumerConfig) *RMQConsumer {
 	if config.Logf == nil {
 		config.Logf = func(msg string, args ...any) {}
 	}
-	if config.ProcessMinBackoff == 0 {
-		config.ProcessMinBackoff = time.Second / 8
+	if config.MinRetryInterval == 0 {
+		config.MinRetryInterval = time.Second / 8
 	}
-	if config.ProcessMaxBackoff == 0 {
-		config.ProcessMaxBackoff = 32 * time.Second
+	if config.MaxRetryInterval == 0 {
+		config.MaxRetryInterval = 32 * time.Second
 	}
 	return &RMQConsumer{config: config}
 }
 
 // Declare will declare an exchange, queue, bindings in preparation for a future Consume call.
 // Only closes the channel on errors.
-func (c *RMQConsumer) Declare(ctx context.Context, rmqConn redial.RMQConnection) (_ *amqp.Channel, err error) {
+func (c *RMQConsumer) Declare(ctx context.Context, rmqConn RMQConnection) (_ *amqp.Channel, err error) {
 	logPrefix := "RMQConsumer.Declare for queue %s"
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
@@ -285,22 +285,12 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 	}
 }
 
-func calcDelay(min, max, current time.Duration) time.Duration {
-	if current == 0 {
-		return min
-	} else if current < max {
-		return current * 2
-	} else {
-		return max
-	}
-}
-
 // Process uses the RMQConsumer config to repeatedly Declare and Consume from an AMQP queue, processing each message concurrently with deliveryProcessor.
 // Because a goroutine is span up for each message, ConsumerQos must be set if this function is being used to provide an upper bound.
 // A default prefetch count (and max goroutine count) of 2000 is used by Process if ConsumerQos isn't set.
 // On any error Process will reconnect to AMQP, redeclare it's topology and resume consumption of messages.
-// Blocks until it's context is finished, upon which it will return with an error describing why the context finished.
-func (c *RMQConsumer) Process(ctx context.Context, rmqConn redial.RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) (err error) {
+// Blocks until it's context is finished.
+func (c *RMQConsumer) Process(ctx context.Context, rmqConn RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := "RMQConsumer.Process for queue %s"
 	if c.config.Qos == (ConsumerQos{}) {
 		c.config.Qos.PrefetchCount = 2000
@@ -309,20 +299,20 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn redial.RMQConnection,
 	for {
 		select {
 		case <-ctx.Done():
-			return context.Cause(ctx)
+			return
 		case <-time.After(delay):
 		}
 
 		mqChan, err := c.Declare(ctx, rmqConn)
 		if err != nil {
-			delay = calcDelay(c.config.ProcessMinBackoff, c.config.ProcessMaxBackoff, delay)
+			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
 			c.config.Logf(logPrefix+" failed to Declare. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
 			continue
 		}
 
 		msgChan, err := c.Consume(ctx, mqChan)
 		if err != nil {
-			delay = calcDelay(c.config.ProcessMinBackoff, c.config.ProcessMaxBackoff, delay)
+			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
 			c.config.Logf(logPrefix+" failed to Consume. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
 			continue
 		}

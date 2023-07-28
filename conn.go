@@ -1,4 +1,4 @@
-package redial
+package rmq
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -22,7 +23,7 @@ type ConnectConfig struct {
 	// AMQPChannelTimeout will set a timeout on every Channel request.
 	// If unset, the only thing stopping a Channel request from blocking indefinitely is the context passed into Channel.
 	AMQPChannelTimeout time.Duration
-	// *RedialInterval are used to implement backoff when dialing AMQP. Defaults to 0.25 seconds to 8 seconds.
+	// *RedialInterval are used to implement backoff when dialing AMQP. Defaults to 0.125 seconds to 32 seconds.
 	MinRedialInterval, MaxRedialInterval time.Duration
 	// Set Logf with your favorite logging library
 	Logf func(msg string, args ...any)
@@ -48,10 +49,10 @@ func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnect
 		conf.Logf = func(string, ...any) {}
 	}
 	if conf.MinRedialInterval == 0 {
-		conf.MinRedialInterval = time.Second / 4
+		conf.MinRedialInterval = time.Second / 8
 	}
 	if conf.MaxRedialInterval == 0 {
-		conf.MaxRedialInterval = 8 * time.Second
+		conf.MaxRedialInterval = 32 * time.Second
 	}
 
 	conn := RMQConnection{
@@ -143,13 +144,7 @@ func (c *RMQConnection) redial() {
 		amqpConn, err := c.dialFn()
 		if err != nil {
 			// Configure our backoff according to parameters
-			if dialDelay == 0 {
-				dialDelay = c.config.MinRedialInterval
-			} else if dialDelay > c.config.MaxRedialInterval {
-				dialDelay = c.config.MaxRedialInterval
-			} else {
-				dialDelay *= 2
-			}
+			dialDelay = internal.CalculateDelay(c.config.MinRedialInterval, c.config.MaxRedialInterval, dialDelay)
 
 			c.config.Logf("RMQConnection dialFn failed, retrying after %s. err: %+v", dialDelay.String(), err)
 			continue

@@ -1,4 +1,4 @@
-package redial
+package rmq
 
 import (
 	"context"
