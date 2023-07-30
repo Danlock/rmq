@@ -1,6 +1,18 @@
 package internal
 
-import "time"
+import (
+	"context"
+	"time"
+)
+
+type ChanReq[T any] struct {
+	Ctx      context.Context
+	RespChan chan ChanResp[T]
+}
+type ChanResp[T any] struct {
+	Val T
+	Err error
+}
 
 func CalculateDelay(min, max, current time.Duration) time.Duration {
 	if current == 0 {
@@ -9,5 +21,19 @@ func CalculateDelay(min, max, current time.Duration) time.Duration {
 		return current * 2
 	} else {
 		return max
+	}
+}
+
+type testingT interface {
+	Helper()
+	Logf(format string, args ...any)
+}
+
+func LogTillCtx(t testingT, ctx context.Context) func(string, ...any) {
+	return func(s string, a ...any) {
+		if ctx.Err() == nil {
+			t.Helper()
+			t.Logf(s, a...)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -112,16 +113,19 @@ func TestRMQConnection_Channel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	goodRMQConn := Connect(ctx, ConnectConfig{}, func() (AMQPConnection, error) {
+	connConf := ConnectConfig{
+		Logf: internal.LogTillCtx(t, ctx),
+	}
+	goodRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return goodMockAMQP, nil
 	})
-	badRMQConn := Connect(ctx, ConnectConfig{}, func() (AMQPConnection, error) {
+	badRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return badMockAMQP, nil
 	})
-	slowRMQConn := Connect(ctx, ConnectConfig{}, func() (AMQPConnection, error) {
+	slowRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
-	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{AMQPChannelTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
+	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Logf: internal.LogTillCtx(t, ctx), AMQPChannelTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
 
@@ -159,7 +163,9 @@ func TestRMQConnection_Channel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// close the connection, redialer should grab a new one in time
 			closeChan <- amqp.ErrClosed
-			_, err := tt.rmqConn.Channel(tt.ctx)
+			ctx, cancel := context.WithTimeout(tt.ctx, time.Second)
+			defer cancel()
+			_, err := tt.rmqConn.Channel(ctx)
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("RMQConnection.Channel() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -167,7 +173,8 @@ func TestRMQConnection_Channel(t *testing.T) {
 		})
 	}
 
-	connConf := ConnectConfig{
+	connConf = ConnectConfig{
+		Logf:              connConf.Logf,
 		MinRedialInterval: time.Millisecond,
 		MaxRedialInterval: 3 * time.Millisecond,
 	}

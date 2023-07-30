@@ -58,8 +58,8 @@ func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnect
 	conn := RMQConnection{
 		ctx:               ctx,
 		dialFn:            dialFn,
-		chanReqChan:       make(chan connReq[*amqp.Channel]),
-		currentConReqChan: make(chan connReq[AMQPConnection]),
+		chanReqChan:       make(chan internal.ChanReq[*amqp.Channel]),
+		currentConReqChan: make(chan internal.ChanReq[AMQPConnection]),
 
 		config: conf,
 	}
@@ -69,17 +69,17 @@ func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnect
 	return &conn
 }
 
-func request[T any](connCtx, ctx context.Context, reqChan chan connReq[T]) (t T, _ error) {
+func request[T any](connCtx, ctx context.Context, reqChan chan internal.ChanReq[T]) (t T, _ error) {
 	if ctx == nil {
 		return t, fmt.Errorf("nil context")
 	}
-	respChan := make(chan connResp[T], 1)
+	respChan := make(chan internal.ChanResp[T], 1)
 	select {
 	case <-connCtx.Done():
 		return t, fmt.Errorf("RMQConnection context finished: %w", context.Cause(connCtx))
 	case <-ctx.Done():
 		return t, context.Cause(ctx)
-	case reqChan <- connReq[T]{ctx: ctx, respChan: respChan}:
+	case reqChan <- internal.ChanReq[T]{Ctx: ctx, RespChan: respChan}:
 	}
 
 	select {
@@ -88,25 +88,16 @@ func request[T any](connCtx, ctx context.Context, reqChan chan connReq[T]) (t T,
 	case <-ctx.Done():
 		return t, context.Cause(ctx)
 	case resp := <-respChan:
-		return resp.val, resp.err
+		return resp.Val, resp.Err
 	}
-}
-
-type connReq[T any] struct {
-	ctx      context.Context
-	respChan chan connResp[T]
-}
-type connResp[T any] struct {
-	val T
-	err error
 }
 
 // RMQConnection is a threadsafe, redialable wrapper around an AMQPConnection.
 type RMQConnection struct {
 	ctx               context.Context
 	dialFn            func() (AMQPConnection, error)
-	chanReqChan       chan connReq[*amqp.Channel]
-	currentConReqChan chan connReq[AMQPConnection]
+	chanReqChan       chan internal.ChanReq[*amqp.Channel]
+	currentConReqChan chan internal.ChanReq[AMQPConnection]
 
 	config ConnectConfig
 }
@@ -171,14 +162,14 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 			c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
 			return
 		case connReq := <-c.currentConReqChan:
-			connReq.respChan <- connResp[AMQPConnection]{val: amqpConn}
+			connReq.RespChan <- internal.ChanResp[AMQPConnection]{Val: amqpConn}
 		case chanReq := <-c.chanReqChan:
 			// Channel() desperately needs a context since RabbitMQ (or the network... or anything else) can and will block during Channel() requests
 			// Leaking a blocked Channel call on timed out contexts is the best we can do from here
-			respChan := make(chan connResp[*amqp.Channel], 1)
+			respChan := make(chan internal.ChanResp[*amqp.Channel], 1)
 			go func() {
-				var resp connResp[*amqp.Channel]
-				resp.val, resp.err = amqpConn.Channel()
+				var resp internal.ChanResp[*amqp.Channel]
+				resp.Val, resp.Err = amqpConn.Channel()
 				respChan <- resp
 			}()
 
@@ -193,12 +184,12 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 				c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
 				return
 			case resp := <-respChan:
-				chanReq.respChan <- resp
-				if resp.err != nil {
+				chanReq.RespChan <- resp
+				if resp.Err != nil {
 					return
 				}
-			case <-chanReq.ctx.Done():
-				chanReq.respChan <- connResp[*amqp.Channel]{err: context.Cause(chanReq.ctx)}
+			case <-chanReq.Ctx.Done():
+				chanReq.RespChan <- internal.ChanResp[*amqp.Channel]{Err: context.Cause(chanReq.Ctx)}
 			}
 		}
 	}

@@ -99,7 +99,7 @@ func NewConsumer(config ConsumerConfig) *RMQConsumer {
 
 // Declare will declare an exchange, queue, bindings in preparation for a future Consume call.
 // Only closes the channel on errors.
-func (c *RMQConsumer) Declare(ctx context.Context, rmqConn RMQConnection) (_ *amqp.Channel, err error) {
+func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *amqp.Channel, err error) {
 	logPrefix := "RMQConsumer.Declare for queue %s"
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
@@ -289,8 +289,8 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 // Because a goroutine is span up for each message, ConsumerQos must be set if this function is being used to provide an upper bound.
 // A default prefetch count (and max goroutine count) of 2000 is used by Process if ConsumerQos isn't set.
 // On any error Process will reconnect to AMQP, redeclare it's topology and resume consumption of messages.
-// Blocks until it's context is finished.
-func (c *RMQConsumer) Process(ctx context.Context, rmqConn RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
+// Blocks until it's context is finished, so call it in a goroutine.
+func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := "RMQConsumer.Process for queue %s"
 	if c.config.Qos == (ConsumerQos{}) {
 		c.config.Qos.PrefetchCount = 2000
