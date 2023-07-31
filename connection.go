@@ -159,7 +159,9 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 			}
 			return
 		case err := <-notifyClose:
-			c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
+			if err != nil {
+				c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
+			}
 			return
 		case connReq := <-c.currentConReqChan:
 			connReq.RespChan <- internal.ChanResp[AMQPConnection]{Val: amqpConn}
@@ -179,9 +181,6 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 				if err := amqpConn.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
 					c.config.Logf("RMQConnection's AMQPConnection (%s) failed to close due to err: %+v", amqpConn.LocalAddr().String(), err)
 				}
-				return
-			case err := <-notifyClose:
-				c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
 				return
 			case resp := <-respChan:
 				chanReq.RespChan <- resp

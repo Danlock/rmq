@@ -3,6 +3,7 @@ package rmq
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/danlock/rmq/internal"
@@ -39,12 +40,16 @@ type PublisherConfig struct {
 	Logf func(msg string, args ...any)
 	// *RetryInterval controls how frequently RMQPublisher retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
+	// MaxConcurrentPublishes fails Publish calls until the concurrent publishes fall below this number.
+	// Set this to provide backpressure and limit the goroutines spawned by RMQPublisher.
+	MaxConcurrentPublishes int64
 }
 
 type RMQPublisher struct {
-	ctx    context.Context
-	config PublisherConfig
-	in     chan *Publishing
+	ctx            context.Context
+	config         PublisherConfig
+	in             chan *Publishing
+	concurrentPubs atomic.Int64
 }
 
 // NewPublisher creates a RMQPublisher that will publish messages to AMQP, redialing on errors.
@@ -66,7 +71,7 @@ func NewPublisher(ctx context.Context, rmqConn *RMQConnection, config PublisherC
 	pub := &RMQPublisher{
 		ctx:    ctx,
 		config: config,
-		in:     make(chan *Publishing, 10),
+		in:     make(chan *Publishing, 100),
 	}
 	go pub.connect(rmqConn)
 	return pub
@@ -124,15 +129,10 @@ func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
 	logPrefix := "RMQPublisher.listen"
 	notifyClose := mqChan.NotifyClose(make(chan *amqp.Error, 2))
 
-	var closing bool
 	for {
 		select {
 		case <-p.ctx.Done():
-			// Close p.in so that listen will close after processing all Publishings
-			if !closing {
-				close(p.in)
-				closing = true
-			}
+			return
 		case err := <-notifyClose:
 			p.config.Logf(logPrefix+" amqp.Channel closed due to err %v, getting a new amqp.Channel", err)
 			return
@@ -140,14 +140,25 @@ func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
 			if !ok {
 				return
 			}
+			// Publish in a separate goroutine so an amqp.Publish can't block our receiving of a close error
 			go pub.publish(mqChan)
 		}
 	}
 }
 
+var ErrTooManyPublishes = fmt.Errorf("Rejecting publish due to RMQPublisher.MaxConcurrentPublishes, retry later or raise RMQPublisher.MaxConcurrentPublishes")
+
 // Publish sends a Publishing to be published on RMQPublisher's current amqp.Channel.
 // Returns an amqp.DeferredConfirmation only if the RMQPublisher is in confirm mode.
 func (p *RMQPublisher) Publish(ctx context.Context, pub Publishing) (*amqp.DeferredConfirmation, error) {
+	if p.config.MaxConcurrentPublishes > 0 {
+		concurrentPubs := p.concurrentPubs.Add(1)
+		defer p.concurrentPubs.Add(-1)
+		if concurrentPubs > p.config.MaxConcurrentPublishes {
+			return nil, ErrTooManyPublishes
+		}
+	}
+
 	pub.req.Ctx = ctx
 	pub.req.RespChan = make(chan internal.ChanResp[*amqp.DeferredConfirmation], 1)
 	select {
@@ -169,8 +180,8 @@ func (p *RMQPublisher) Publish(ctx context.Context, pub Publishing) (*amqp.Defer
 }
 
 // PublishUntilConfirmed calls Publish and waits for it's AMQP confirm. It will republish if AMQP nacks, or takes longer than confirmTimeout.
-// Use context.WithTimeout so this function doesn't retry forever. Should only be used when you know the Exchange and RoutingKey will have a queue waiting,
-// otherwise this will simply retry forever on each Nack.
+// Should only be used when the Exchange and RoutingKey have a queue listening, else this will retry forever because of the Nack's.
+// Use context.WithTimeout so this function can't retry forever.
 func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, retryOnPublishErr bool, pub Publishing) error {
 	logPrefix := "RMQPublisher.PublishUntilConfirmed"
 	if p.config.DontConfirm {

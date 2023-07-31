@@ -137,26 +137,28 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 			respChan <- resp{queue, err}
 		}()
 
-		if c.config.Exchange.Passive {
-			err = mqChan.ExchangeDeclarePassive(
-				c.config.Exchange.Name,
-				c.config.Exchange.Kind,
-				c.config.Exchange.Durable,
-				c.config.Exchange.AutoDelete,
-				c.config.Exchange.Internal,
-				c.config.Exchange.NoWait,
-				c.config.Exchange.Args,
-			)
-		} else {
-			err = mqChan.ExchangeDeclare(
-				c.config.Exchange.Name,
-				c.config.Exchange.Kind,
-				c.config.Exchange.Durable,
-				c.config.Exchange.AutoDelete,
-				c.config.Exchange.Internal,
-				c.config.Exchange.NoWait,
-				c.config.Exchange.Args,
-			)
+		if c.config.Exchange.Name != "" {
+			if c.config.Exchange.Passive {
+				err = mqChan.ExchangeDeclarePassive(
+					c.config.Exchange.Name,
+					c.config.Exchange.Kind,
+					c.config.Exchange.Durable,
+					c.config.Exchange.AutoDelete,
+					c.config.Exchange.Internal,
+					c.config.Exchange.NoWait,
+					c.config.Exchange.Args,
+				)
+			} else {
+				err = mqChan.ExchangeDeclare(
+					c.config.Exchange.Name,
+					c.config.Exchange.Kind,
+					c.config.Exchange.Durable,
+					c.config.Exchange.AutoDelete,
+					c.config.Exchange.Internal,
+					c.config.Exchange.NoWait,
+					c.config.Exchange.Args,
+				)
+			}
 		}
 
 		if err != nil {

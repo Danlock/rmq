@@ -33,7 +33,7 @@ func (m *MockAMQPConnection) LocalAddr() net.Addr {
 	return &net.UnixAddr{"MockAMQPConnection", "unix"}
 }
 func (m *MockAMQPConnection) Close() error {
-	return nil
+	return fmt.Errorf("MockAMQPConnection.Close error that should just be logged")
 }
 
 func TestConnect(t *testing.T) {
@@ -99,6 +99,8 @@ func TestRMQConnection_CurrentConnection(t *testing.T) {
 func TestRMQConnection_Channel(t *testing.T) {
 	closeChan := make(chan *amqp.Error, 5)
 	badErr := fmt.Errorf("shucks")
+	// close the connection, redialer should grab a new one in time
+	closeChan <- amqp.ErrClosed
 	goodMockAMQP := &MockAMQPConnection{
 		ChannelFn:       func() (*amqp.Channel, error) { return nil, nil },
 		NotifyCloseChan: closeChan}
@@ -161,8 +163,6 @@ func TestRMQConnection_Channel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// close the connection, redialer should grab a new one in time
-			closeChan <- amqp.ErrClosed
 			ctx, cancel := context.WithTimeout(tt.ctx, time.Second)
 			defer cancel()
 			_, err := tt.rmqConn.Channel(ctx)
