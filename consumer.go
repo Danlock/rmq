@@ -251,7 +251,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 			}
 		}
 	}()
-
+	// TODO: https://github.com/rabbitmq/amqp091-go/pull/192 has merged a Channel.ConsumeWithContext, which may just cause this entire function to be deleted in the future.
 	type resp struct {
 		deliveries <-chan amqp.Delivery
 		err        error

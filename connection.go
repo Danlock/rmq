@@ -21,7 +21,7 @@ type AMQPConnection interface {
 
 type ConnectConfig struct {
 	// AMQPChannelTimeout will set a timeout on every Channel request.
-	// If unset, the only thing stopping a Channel request from blocking indefinitely is the context passed into Channel.
+	// If unset, please ensure calls to Channel contain a context with a timeout.
 	AMQPChannelTimeout time.Duration
 	// *RedialInterval are used to implement backoff when dialing AMQP. Defaults to 0.125 seconds to 32 seconds.
 	MinRedialInterval, MaxRedialInterval time.Duration

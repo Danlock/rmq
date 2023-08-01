@@ -41,7 +41,7 @@ type PublisherConfig struct {
 	// *RetryInterval controls how frequently RMQPublisher retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
 	// MaxConcurrentPublishes fails Publish calls until the concurrent publishes fall below this number.
-	// Set this to provide backpressure and limit the goroutines spawned by RMQPublisher.
+	// This will limit the goroutines spawned by RMQPublisher, and combined with PublishUntilConfirmed is a good form of backpressure.
 	MaxConcurrentPublishes int64
 }
 

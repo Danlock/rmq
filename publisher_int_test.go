@@ -41,19 +41,17 @@ func TestRMQPublisher(t *testing.T) {
 	// 	Logf: logf,
 	// })
 
-	wantedPub := rmq.Publishing{
-		Exchange: "amq.topic",
-		Publishing: amqp.Publishing{
-			Body: []byte("TestRMQPublisher"),
-		},
+	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
+	if unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, false, rmq.Publishing{}) == nil {
+		t.Fatalf("PublishUntilConfirmed succeeded despite the publisher set dont confirm")
 	}
 
-	_ = rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{})
 	returnChan, flowChan := make(chan amqp.Return, 5), make(chan bool, 5)
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
-		Logf:         logf,
-		NotifyReturn: returnChan,
-		NotifyFlow:   flowChan,
+		Logf:                   logf,
+		NotifyReturn:           returnChan,
+		NotifyFlow:             flowChan,
+		MaxConcurrentPublishes: 1,
 	})
 	forceRedial := func() {
 		amqpConn, err := rmqConn.CurrentConnection(ctx)
@@ -66,6 +64,8 @@ func TestRMQPublisher(t *testing.T) {
 	forceRedial()
 	pubCtx, pubCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pubCancel()
+	wantedPub := rmq.Publishing{Exchange: "amq.topic"}
+	wantedPub.Body = []byte("TestRMQPublisher")
 	err := rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, false, wantedPub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed failed with %v", err)
@@ -88,6 +88,19 @@ func TestRMQPublisher(t *testing.T) {
 		}
 	}
 
+	// Publish a few messages at the same time. PublishUntilConfirmed will retry even when RMQPublisher throws ErrTooManyPublishes
+	pubCount := 3
+	errChan := make(chan error, pubCount)
+	for i := 0; i < pubCount; i++ {
+		go func() {
+			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, true, wantedPub)
+		}()
+	}
+	for i := 0; i < pubCount; i++ {
+		if err := <-errChan; err != nil {
+			t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+		}
+	}
 	// Cancel everything, now the publisher stopped processing
 	cancel()
 	_, err = rmqPub.Publish(context.Background(), wantedPub)
