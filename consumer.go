@@ -12,11 +12,11 @@ import (
 
 // ConsumerConfig contains all the information needed to declare and consume from a queue.
 type ConsumerConfig struct {
-	Exchange ConsumerExchange
-	Queue    ConsumerQueue
-	Bindings []ConsumerBinding
-	Consume  ConsumerConsume
-	Qos      ConsumerQos
+	Exchanges []ConsumerExchange
+	Bindings  []ConsumerBinding
+	Queue     ConsumerQueue
+	Consume   ConsumerConsume
+	Qos       ConsumerQos
 
 	// AMQPTimeout sets a timeout on all AMQP requests.
 	// Defaults to 30 seconds.
@@ -25,6 +25,9 @@ type ConsumerConfig struct {
 	Logf func(msg string, args ...any)
 	// *RetryInterval controls how frequently RMQConsumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
+	// ProcessSkipDeclare makes Process not Declare the topology each time. Beware of doing this whilst using auto delete.
+	// Declare should be called by the user before Process, or at least Queue.Name should be a pre existing queue.
+	ProcessSkipDeclare bool
 }
 
 // ConsumerExchange are args for amqp.Channel.ExchangeDeclare
@@ -137,33 +140,33 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 			respChan <- resp{queue, err}
 		}()
 
-		if c.config.Exchange.Name != "" {
-			if c.config.Exchange.Passive {
+		for _, e := range c.config.Exchanges {
+			if e.Passive {
 				err = mqChan.ExchangeDeclarePassive(
-					c.config.Exchange.Name,
-					c.config.Exchange.Kind,
-					c.config.Exchange.Durable,
-					c.config.Exchange.AutoDelete,
-					c.config.Exchange.Internal,
-					c.config.Exchange.NoWait,
-					c.config.Exchange.Args,
+					e.Name,
+					e.Kind,
+					e.Durable,
+					e.AutoDelete,
+					e.Internal,
+					e.NoWait,
+					e.Args,
 				)
 			} else {
 				err = mqChan.ExchangeDeclare(
-					c.config.Exchange.Name,
-					c.config.Exchange.Kind,
-					c.config.Exchange.Durable,
-					c.config.Exchange.AutoDelete,
-					c.config.Exchange.Internal,
-					c.config.Exchange.NoWait,
-					c.config.Exchange.Args,
+					e.Name,
+					e.Kind,
+					e.Durable,
+					e.AutoDelete,
+					e.Internal,
+					e.NoWait,
+					e.Args,
 				)
 			}
-		}
 
-		if err != nil {
-			err = fmt.Errorf(logPrefix+" failed to declare exchange %s due to %w", c.config.Queue.Name, c.config.Exchange.Name, err)
-			return
+			if err != nil {
+				err = fmt.Errorf(logPrefix+" failed to declare exchange %s due to %w", c.config.Queue.Name, e.Name, err)
+				return
+			}
 		}
 
 		if c.config.Queue.Passive {
@@ -229,7 +232,9 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", c.config.Queue.Name, context.Cause(ctx))
 	case r := <-respChan:
 		// Set our consumer's queue name in case of an anonymous queue which would have left c.Config.Queue.Name blank
-		c.config.Queue.Name = r.queue.Name
+		if r.queue.Name != "" {
+			c.config.Queue.Name = r.queue.Name
+		}
 		return mqChan, r.err
 	}
 }
@@ -290,7 +295,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 // Process uses the RMQConsumer config to repeatedly Declare and Consume from an AMQP queue, processing each message concurrently with deliveryProcessor.
 // Because a goroutine is span up for each message, ConsumerQos must be set if this function is being used to provide an upper bound.
 // A default prefetch count (and max goroutine count) of 2000 is used by Process if ConsumerQos isn't set.
-// On any error Process will reconnect to AMQP, redeclare it's topology and resume consumption of messages.
+// On any error Process will reconnect to AMQP, redeclare it's topology (unless ProcessSkipDeclare) and resume consumption of messages.
 // Blocks until it's context is finished, so call it in a goroutine.
 func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := "RMQConsumer.Process for queue %s"
@@ -298,6 +303,8 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 		c.config.Qos.PrefetchCount = 2000
 	}
 	var delay time.Duration
+	var mqChan *amqp.Channel
+	var err error
 	for {
 		select {
 		case <-ctx.Done():
@@ -305,10 +312,14 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 		case <-time.After(delay):
 		}
 
-		mqChan, err := c.Declare(ctx, rmqConn)
+		if c.config.ProcessSkipDeclare {
+			mqChan, err = rmqConn.Channel(ctx)
+		} else {
+			mqChan, err = c.Declare(ctx, rmqConn)
+		}
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
-			c.config.Logf(logPrefix+" failed to Declare. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
+			c.config.Logf(logPrefix+" failed to acquire amqp.Channel. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
 			continue
 		}
 

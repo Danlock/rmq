@@ -33,7 +33,7 @@ func LogTillCtx(t testingT, ctx context.Context) func(string, ...any) {
 	return func(s string, a ...any) {
 		if ctx.Err() == nil {
 			t.Helper()
-			t.Logf(s, a...)
+			t.Logf(time.Now().Format(time.RFC3339Nano)+": "+s, a...)
 		}
 	}
 }
