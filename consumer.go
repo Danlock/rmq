@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/danlock/rmq/internal"
@@ -25,7 +26,7 @@ type ConsumerConfig struct {
 	Logf func(msg string, args ...any)
 	// *RetryInterval controls how frequently RMQConsumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
-	// ProcessSkipDeclare makes Process not Declare the topology each time. Beware of doing this whilst using auto delete.
+	// ProcessSkipDeclare makes Process not Declare the topology on reconnects. Beware of setting this with auto delete or queue/exchange TTL.
 	// Declare should be called by the user before Process, or at least Queue.Name should be a pre existing queue.
 	ProcessSkipDeclare bool
 }
@@ -168,8 +169,8 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 				return
 			}
 		}
-
-		if c.config.Queue.Passive {
+		// Passively declare queue names that start with an amq. or get an ACCESS_FORBIDDEN error
+		if c.config.Queue.Passive || strings.HasPrefix(c.config.Queue.Name, "amq.") {
 			queue, err = mqChan.QueueDeclarePassive(
 				c.config.Queue.Name,
 				c.config.Queue.Durable,
@@ -293,15 +294,12 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 }
 
 // Process uses the RMQConsumer config to repeatedly Declare and Consume from an AMQP queue, processing each message concurrently with deliveryProcessor.
-// Because a goroutine is span up for each message, ConsumerQos must be set if this function is being used to provide an upper bound.
-// A default prefetch count (and max goroutine count) of 2000 is used by Process if ConsumerQos isn't set.
+// Qos.PrefetchCount can be used to set a limit on the goroutines spawned, since they are per message.
 // On any error Process will reconnect to AMQP, redeclare it's topology (unless ProcessSkipDeclare) and resume consumption of messages.
 // Blocks until it's context is finished, so call it in a goroutine.
 func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := "RMQConsumer.Process for queue %s"
-	if c.config.Qos == (ConsumerQos{}) {
-		c.config.Qos.PrefetchCount = 2000
-	}
+
 	var delay time.Duration
 	var mqChan *amqp.Channel
 	var err error

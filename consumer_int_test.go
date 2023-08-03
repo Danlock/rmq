@@ -122,3 +122,101 @@ func TestRMQConsumer(t *testing.T) {
 		}
 	}
 }
+
+func TestRMQConsumer_Stress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	logf := internal.LogTillCtx(t, ctx)
+
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+
+	baseConsConfig := rmq.ConsumerConfig{
+		Exchanges: []rmq.ConsumerExchange{{
+			Name:    "amq.topic",
+			Kind:    amqp.ExchangeTopic,
+			Durable: true,
+		}},
+		Queue: rmq.ConsumerQueue{
+			Args: amqp.Table{"x-expires": time.Minute.Milliseconds()},
+		},
+		Bindings: []rmq.ConsumerBinding{
+			{ExchangeName: "amq.topic", RoutingKey: "TestRMQConsumer_Stress"},
+		},
+		Consume: rmq.ConsumerConsume{
+			Consumer: "TestRMQConsumerBase",
+		},
+		ProcessSkipDeclare: false,
+		Logf:               logf,
+	}
+	baseCons := rmq.NewConsumer(baseConsConfig)
+	mqChan, err := baseCons.Declare(ctx, rmqConn)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	mqChan.Close()
+
+	skipConsConfig := baseConsConfig
+	skipConsConfig.ProcessSkipDeclare = true
+	skipCons := rmq.NewConsumer(skipConsConfig)
+	mqChan, err = skipCons.Declare(ctx, rmqConn)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	mqChan.Close()
+
+	lowPrefetchConsConfig := baseConsConfig
+	lowPrefetchConsConfig.Qos.PrefetchCount = 10
+	lowPrefetchCons := rmq.NewConsumer(lowPrefetchConsConfig)
+	mqChan, err = lowPrefetchCons.Declare(ctx, rmqConn)
+	if err != nil {
+		t.Fatalf(err.Error())
+	}
+	mqChan.Close()
+
+	msgCount := 100_000
+	msgChan := make(chan amqp.Delivery, msgCount)
+
+	consumeAndDeliver := func(cons *rmq.RMQConsumer) {
+		delivered := 0
+		cons.Process(ctx, rmqConn, func(ctx context.Context, msg amqp.Delivery) {
+			msgChan <- msg
+			delivered++
+		})
+		logf("Consumer deliver %d messages", delivered)
+	}
+	// Send msgCount messages over pubsubCount of consumers and publishers and see if everything processes smoothly
+	pubsubCount := 5
+	for i := 0; i < pubsubCount; i++ {
+		go consumeAndDeliver(baseCons)
+		go consumeAndDeliver(skipCons)
+		go consumeAndDeliver(lowPrefetchCons)
+	}
+
+	testPub := rmq.Publishing{
+		Exchange:   baseConsConfig.Bindings[0].ExchangeName,
+		RoutingKey: baseConsConfig.Bindings[0].RoutingKey,
+		Mandatory:  true,
+	}
+	testPub.Body = []byte(time.Now().Format(time.RFC3339))
+
+	for i := 0; i < pubsubCount; i++ {
+		pub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Logf: logf})
+		go func() {
+			for i := 0; i < msgCount/pubsubCount; i++ {
+				pub.PublishUntilConfirmed(ctx, time.Minute, true, testPub)
+			}
+		}()
+	}
+
+	for i := 0; i < msgCount; i++ {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for message %d", i)
+		case msg := <-msgChan:
+			if !reflect.DeepEqual(testPub.Body, msg.Body) {
+				t.Fatalf("message %d was unexpected %s", i, string(msg.Body))
+			}
+		}
+	}
+}
