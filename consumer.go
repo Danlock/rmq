@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/danlock/rmq/internal"
@@ -104,7 +105,7 @@ func NewConsumer(config ConsumerConfig) *RMQConsumer {
 // Declare will declare an exchange, queue, bindings in preparation for a future Consume call.
 // Only closes the channel on errors.
 func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *amqp.Channel, err error) {
-	logPrefix := "RMQConsumer.Declare for queue %s"
+	logPrefix := fmt.Sprintf("RMQConsumer.Declare for queue %s", c.config.Queue.Name)
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.config.AMQPTimeout)
@@ -113,13 +114,13 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 
 	mqChan, err := rmqConn.Channel(ctx)
 	if err != nil {
-		return nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", c.config.Queue.Name, err)
+		return nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", err)
 	}
 	defer func() {
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", c.config.Queue.Name, mqChanErr)
+				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", mqChanErr)
 			}
 		}
 	}()
@@ -165,7 +166,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 			}
 
 			if err != nil {
-				err = fmt.Errorf(logPrefix+" failed to declare exchange %s due to %w", c.config.Queue.Name, e.Name, err)
+				err = fmt.Errorf(logPrefix+" failed to declare exchange %s due to %w", e.Name, err)
 				return
 			}
 		}
@@ -190,7 +191,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 			)
 		}
 		if err != nil {
-			err = fmt.Errorf(logPrefix+" failed to declare queue due to %w", c.config.Queue.Name, err)
+			err = fmt.Errorf(logPrefix+" failed to declare queue due to %w", err)
 			return
 		}
 
@@ -217,7 +218,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		if c.config.Qos != (ConsumerQos{}) {
 			err = mqChan.Qos(c.config.Qos.PrefetchCount, c.config.Qos.PrefetchSize, c.config.Qos.Global)
 			if err != nil {
-				err = fmt.Errorf(logPrefix+" unable to set prefetch due to %w", queue.Name, err)
+				err = fmt.Errorf(logPrefix+" unable to set prefetch due to %w", err)
 				return
 			}
 		}
@@ -228,9 +229,9 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		go func() {
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
-			c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", c.config.Queue.Name, time.Since(start), r.err)
+			c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
 		}()
-		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", c.config.Queue.Name, context.Cause(ctx))
+		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", context.Cause(ctx))
 	case r := <-respChan:
 		// Set our consumer's queue name in case of an anonymous queue which would have left c.Config.Queue.Name blank
 		if r.queue.Name != "" {
@@ -242,7 +243,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 
 // Consume will start consuming from the previously declared queue. Only closes mqChan on errors.
 func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-chan amqp.Delivery, err error) {
-	logPrefix := "RMQConsumer.Consume for queue %s"
+	logPrefix := fmt.Sprintf("RMQConsumer.Consume for queue %s", c.config.Queue.Name)
 	if c.config.AMQPTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.config.AMQPTimeout)
@@ -253,7 +254,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", c.config.Queue.Name, mqChanErr)
+				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", mqChanErr)
 			}
 		}
 	}()
@@ -284,10 +285,10 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
 			if r.err != nil {
-				c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", c.config.Queue.Name, time.Since(start), r.err)
+				c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
 			}
 		}()
-		return nil, fmt.Errorf(logPrefix+" context ended before it finished due to %w", c.config.Queue.Name, context.Cause(ctx))
+		return nil, fmt.Errorf(logPrefix+" context ended before it finished due to %w", context.Cause(ctx))
 	case r := <-respChan:
 		return r.deliveries, r.err
 	}
@@ -298,7 +299,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 // On any error Process will reconnect to AMQP, redeclare it's topology (unless ProcessSkipDeclare) and resume consumption of messages.
 // Blocks until it's context is finished, so call it in a goroutine.
 func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
-	logPrefix := "RMQConsumer.Process for queue %s"
+	logPrefix := fmt.Sprintf("RMQConsumer.Process for queue %s", c.config.Queue.Name)
 
 	var delay time.Duration
 	var mqChan *amqp.Channel
@@ -317,14 +318,14 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 		}
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
-			c.config.Logf(logPrefix+" failed to acquire amqp.Channel. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
+			c.config.Logf(logPrefix+" failed to acquire amqp.Channel. Retrying in %s due to %v", delay.String(), err)
 			continue
 		}
 
 		msgChan, err := c.Consume(ctx, mqChan)
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
-			c.config.Logf(logPrefix+" failed to Consume. Retrying in %s due to %v", c.config.Queue.Name, delay.String(), err)
+			c.config.Logf(logPrefix+" failed to Consume. Retrying in %s due to %v", delay.String(), err)
 			continue
 		}
 		// Successfully redeclared our topology, so reset the backoff
@@ -335,25 +336,28 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 }
 
 func (c *RMQConsumer) processDeliveries(ctx context.Context, mqChan *amqp.Channel, msgChan <-chan amqp.Delivery, processor func(ctx context.Context, msg amqp.Delivery)) {
-	logPrefix := "RMQConsumer.processDeliveries for queue %s"
+	logPrefix := fmt.Sprintf("RMQConsumer.processDeliveries for queue %s", c.config.Queue.Name)
 	closeNotifier := mqChan.NotifyClose(make(chan *amqp.Error, 2))
+	var consGroup sync.WaitGroup
 	for {
 		select {
 		case <-ctx.Done():
+			consGroup.Wait()
 			if err := mqChan.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to Close it's AMQP channel due to %v", c.config.Queue.Name, err)
+				c.config.Logf(logPrefix+" failed to Close it's AMQP channel due to %v", err)
 				// Typically we exit processDeliveries by waiting for the msgChan to close, but if we can't close the mqChan then abandon ship
 				return
 			}
 		case err := <-closeNotifier:
 			if err != nil {
-				c.config.Logf(logPrefix+" got an AMQP Channel Close error %+v", c.config.Queue.Name, err)
+				c.config.Logf(logPrefix+" got an AMQP Channel Close error %+v", err)
 			}
 		case msg, ok := <-msgChan:
 			if !ok {
 				return
 			}
-			go processor(ctx, msg)
+			consGroup.Add(1)
+			go func() { processor(ctx, msg); consGroup.Done() }()
 		}
 	}
 }

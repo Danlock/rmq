@@ -97,7 +97,7 @@ func TestRMQConsumer(t *testing.T) {
 	errChan := make(chan error, pubCount)
 	for i := 0; i < pubCount; i++ {
 		go func() {
-			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, true, wantedPub)
+			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{RetryOnPublishErr: true}, wantedPub)
 		}()
 	}
 	forceRedial()
@@ -204,7 +204,7 @@ func TestRMQConsumer_Stress(t *testing.T) {
 		pub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Logf: logf})
 		go func() {
 			for i := 0; i < msgCount/pubsubCount; i++ {
-				pub.PublishUntilConfirmed(ctx, time.Minute, true, testPub)
+				pub.PublishUntilConfirmed(ctx, rmq.PublishUntilConfirmedConfig{RetryOnPublishErr: true}, testPub)
 			}
 		}()
 	}

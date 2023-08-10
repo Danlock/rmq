@@ -149,18 +149,19 @@ func (c *RMQConnection) redial() {
 
 // listen listens and responds to Channel and Connection requests. It returns on any failure to prompt another redial.
 func (c *RMQConnection) listen(amqpConn AMQPConnection) {
+	logPrefix := fmt.Sprintf("RMQConnection's AMQPConnection (%s)", amqpConn.LocalAddr())
 	notifyClose := amqpConn.NotifyClose(make(chan *amqp.Error, 1))
 	for {
 		select {
 		case <-c.ctx.Done():
 			// RMQConnection is shutting down, close the connection on our way out
 			if err := amqpConn.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-				c.config.Logf("RMQConnection's AMQPConnection (%s) failed to close due to err: %+v", amqpConn.LocalAddr().String(), err)
+				c.config.Logf(logPrefix+" failed to close due to err: %+v", err)
 			}
 			return
 		case err := <-notifyClose:
 			if err != nil {
-				c.config.Logf("RMQConnection's AMQPConnection (%s) recieved close notification err: %+v", amqpConn.LocalAddr().String(), err)
+				c.config.Logf(logPrefix+" recieved close notification err: %+v", err)
 			}
 			return
 		case connReq := <-c.currentConReqChan:
@@ -179,7 +180,7 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 			case <-c.ctx.Done():
 				// RMQConnection is shutting down, close the connection on our way out
 				if err := amqpConn.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-					c.config.Logf("RMQConnection's AMQPConnection (%s) failed to close due to err: %+v", amqpConn.LocalAddr().String(), err)
+					c.config.Logf(logPrefix+"  failed to close due to err: %+v", err)
 				}
 				return
 			case resp := <-respChan:

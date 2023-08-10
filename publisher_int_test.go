@@ -22,35 +22,15 @@ func TestRMQPublisher(t *testing.T) {
 
 	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
-	// rmqCons := rmq.NewConsumer(rmq.ConsumerConfig{
-	// 	Exchange: rmq.ConsumerExchange{
-	// 		Name: "amq.topic",
-	// 		Kind: amqp.ExchangeTopic,
-	// 	},
-	// 	Queue: rmq.ConsumerQueue{
-	// 		Name:       "TestRMQPublisher" + time.Now().String(),
-	// 		AutoDelete: true,
-	// 	},
-	// 	Bindings: []rmq.ConsumerBinding{
-	// 		{ExchangeName: "amq.topic", RoutingKey: "TestRMQPublisher"},
-	// 	},
-	// 	Consume: rmq.ConsumerConsume{
-	// 		Consumer: "TestRMQPublisher",
-	// 	},
-
-	// 	Logf: logf,
-	// })
-
 	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
-	if unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, false, rmq.Publishing{}) == nil {
+	if unreliableRMQPub.PublishUntilConfirmed(ctx, rmq.PublishUntilConfirmedConfig{}, rmq.Publishing{}) == nil {
 		t.Fatalf("PublishUntilConfirmed succeeded despite the publisher set dont confirm")
 	}
 
-	returnChan, flowChan := make(chan amqp.Return, 5), make(chan bool, 5)
+	returnChan := make(chan amqp.Return, 5)
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
 		Logf:                   logf,
 		NotifyReturn:           returnChan,
-		NotifyFlow:             flowChan,
 		MaxConcurrentPublishes: 1,
 	})
 	forceRedial := func() {
@@ -64,9 +44,10 @@ func TestRMQPublisher(t *testing.T) {
 	forceRedial()
 	pubCtx, pubCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pubCancel()
+
 	wantedPub := rmq.Publishing{Exchange: "amq.topic"}
 	wantedPub.Body = []byte("TestRMQPublisher")
-	err := rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, false, wantedPub)
+	err := rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{}, wantedPub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed failed with %v", err)
 	}
@@ -93,12 +74,31 @@ func TestRMQPublisher(t *testing.T) {
 	errChan := make(chan error, pubCount)
 	for i := 0; i < pubCount; i++ {
 		go func() {
-			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, true, wantedPub)
+			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{RetryOnPublishErr: true}, wantedPub, wantedPub, wantedPub)
 		}()
 	}
 	for i := 0; i < pubCount; i++ {
 		if err := <-errChan; err != nil {
 			t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+		}
+	}
+	// Publishing mandatory and immediate messages to nonexistent queues works as long as PublishUntilConfirmedConfig.RetryOnNack is false
+	mandatoryPub := rmq.Publishing{Exchange: "Idontexist", Mandatory: true}
+	immediatePub := rmq.Publishing{Exchange: "Idontexist", Immediate: true}
+	returnedPub := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "idontexist", Mandatory: true}
+	mandatoryPub.Body = wantedPub.Body
+	immediatePub.Body = wantedPub.Body
+	returnedPub.Body = []byte("oops")
+	err = rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{}, wantedPub, mandatoryPub, immediatePub, returnedPub)
+	if err != nil {
+		t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+	}
+	select {
+	case <-pubCtx.Done():
+		t.Fatalf("didnt get return")
+	case ret := <-returnChan:
+		if !reflect.DeepEqual(returnedPub.Body, ret.Body) {
+			t.Fatalf("got different return message")
 		}
 	}
 	// Cancel everything, now the publisher stopped processing
