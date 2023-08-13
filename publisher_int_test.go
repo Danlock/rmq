@@ -23,7 +23,8 @@ func TestRMQPublisher(t *testing.T) {
 	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
-	if unreliableRMQPub.PublishUntilConfirmed(ctx, rmq.PublishUntilConfirmedConfig{}, rmq.Publishing{}) == nil {
+	_, err := unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, rmq.Publishing{})
+	if err == nil {
 		t.Fatalf("PublishUntilConfirmed succeeded despite the publisher set dont confirm")
 	}
 
@@ -47,7 +48,7 @@ func TestRMQPublisher(t *testing.T) {
 
 	wantedPub := rmq.Publishing{Exchange: "amq.topic"}
 	wantedPub.Body = []byte("TestRMQPublisher")
-	err := rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{}, wantedPub)
+	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed failed with %v", err)
 	}
@@ -74,7 +75,8 @@ func TestRMQPublisher(t *testing.T) {
 	errChan := make(chan error, pubCount)
 	for i := 0; i < pubCount; i++ {
 		go func() {
-			errChan <- rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{RetryOnPublishErr: true}, wantedPub, wantedPub, wantedPub)
+			_, err := rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub, wantedPub, wantedPub)
+			errChan <- err
 		}()
 	}
 	for i := 0; i < pubCount; i++ {
@@ -82,17 +84,19 @@ func TestRMQPublisher(t *testing.T) {
 			t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
 		}
 	}
-	// Publishing mandatory and immediate messages to nonexistent queues works as long as PublishUntilConfirmedConfig.RetryOnNack is false
+	// Publishing mandatory and immediate messages to nonexistent queues should get confirmed, just not acked.
 	mandatoryPub := rmq.Publishing{Exchange: "Idontexist", Mandatory: true}
 	immediatePub := rmq.Publishing{Exchange: "Idontexist", Immediate: true}
 	returnedPub := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "idontexist", Mandatory: true}
 	mandatoryPub.Body = wantedPub.Body
 	immediatePub.Body = wantedPub.Body
 	returnedPub.Body = []byte("oops")
-	err = rmqPub.PublishUntilConfirmed(pubCtx, rmq.PublishUntilConfirmedConfig{}, wantedPub, mandatoryPub, immediatePub, returnedPub)
+	// TODO: figure out why returnedPub fails to get an amqp.Return depending on order
+	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, returnedPub, wantedPub, mandatoryPub, immediatePub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
 	}
+
 	select {
 	case <-pubCtx.Done():
 		t.Fatalf("didnt get return")

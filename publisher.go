@@ -169,6 +169,10 @@ var ErrTooManyPublishes = fmt.Errorf("Rejecting publish due to RMQPublisher.MaxC
 // Returns amqp.DefferedConfirmation's only if the RMQPublisher has Confirm set.
 // Publishings are sent until error. PublishingResponses contains successful publishes only.
 func (p *RMQPublisher) Publish(ctx context.Context, pubs ...Publishing) ([]PublishingResponse, error) {
+	if len(pubs) == 0 {
+		return nil, nil
+	}
+
 	if p.config.MaxConcurrentPublishes > 0 {
 		concurrentPubs := p.concurrentPubs.Add(1)
 		defer p.concurrentPubs.Add(-1)
@@ -198,85 +202,82 @@ func (p *RMQPublisher) Publish(ctx context.Context, pubs ...Publishing) ([]Publi
 	}
 }
 
-type PublishUntilConfirmedConfig struct {
-	// ConfirmTimeout is how long PublishUntilConfirmed waits before republishing. Defaults to 1 minute.
-	ConfirmTimeout time.Duration
-	// RetryOnPublishErr controls whether PublishUntilConfirmed retries when a publish fails
-	RetryOnPublishErr bool
-	// RetryOnNack controls whether PublishUntilConfirmed retries on a nack. User discretion is advised.
-	// If a Publishing is sent to an nonexisting exchange or routing key with no queue while this is set,
-	// PublishUntilConfirmed will republish repeatedly until the queue/exchange is created.
-	RetryOnNack bool
-}
-
 // PublishUntilConfirmed calls Publish and waits for the Publishings to be confirmed.
 // It republishes if a message isn't confirmed after ConfirmTimeout.
-// TODO: On error, returns the pubs that were not acked.
-func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, cfg PublishUntilConfirmedConfig, pubs ...Publishing) ([]Publishing, error) {
+// Returns []PublishingResponse which include the amqp.DefferredConfirmation for acked checks.
+// Recommended to call with context.WithTimeout.
+func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, pubs ...Publishing) ([]PublishingResponse, error) {
 	logPrefix := "RMQPublisher.PublishUntilConfirmed"
-	if p.config.DontConfirm {
-		return pubs, fmt.Errorf(logPrefix + " called on a RMQPublisher that's not in Confirm mode")
-	}
-	if cfg.ConfirmTimeout == 0 {
-		cfg.ConfirmTimeout = time.Minute
+	if len(pubs) == 0 {
+		return nil, nil
 	}
 
+	allConfirmed := make([]PublishingResponse, 0, len(pubs))
+	if p.config.DontConfirm {
+		return allConfirmed, fmt.Errorf(logPrefix + " called on a RMQPublisher that's not in Confirm mode")
+	}
+	if confirmTimeout <= 0 {
+		confirmTimeout = 5 * time.Minute
+	}
+
+	pubsToConfirm := len(pubs)
 	var pubDelay time.Duration
 	for {
 		pendConfirms, err := p.Publish(ctx, pubs...)
 		if err != nil {
-			if cfg.RetryOnPublishErr {
-				pubDelay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, pubDelay)
-				p.config.Logf(logPrefix+" got a Publish error. Republishing after %s due to %v", pubDelay.String(), err)
-				select {
-				case <-ctx.Done():
-					return pubs, fmt.Errorf(logPrefix+" context done before the publish was sent %w", context.Cause(ctx))
-				case <-time.After(pubDelay):
-					continue
-				}
-			} else {
-				return err
+			pubDelay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, pubDelay)
+			p.config.Logf(logPrefix+" got a Publish error. Republishing after %s due to %v", pubDelay.String(), err)
+			select {
+			case <-ctx.Done():
+				return allConfirmed, fmt.Errorf(logPrefix+" context done before the publish was sent %w", context.Cause(ctx))
+			case <-time.After(pubDelay):
+				continue
 			}
 		}
 		// Succesfully published, so reset the delay
 		pubDelay = 0
 
-		pubs, err = p.handleConfirms(ctx, cfg, pubs, pendConfirms)
-		if err != nil {
-			return pubs, err
+		confirmed, unconfirmed, err := p.handleConfirms(ctx, confirmTimeout, pubs, pendConfirms)
+		allConfirmed = append(allConfirmed, confirmed...)
+		if (err != nil && !errors.Is(err, ErrConfirmTimeout)) || len(allConfirmed) == pubsToConfirm {
+			return allConfirmed, err
 		}
-		if len(pubs) == 0 {
-			return nil, nil
+
+		p.config.Logf(logPrefix+" timed out waiting on %d confirms. Republishing...", len(unconfirmed))
+
+		// Make a new pubs slice and copy the Publishing's over so we don't mess with any confirmed PublishingResponse.Pub pointers
+		pubs = make([]Publishing, 0, len(unconfirmed))
+		for _, r := range unconfirmed {
+			pubs = append(pubs, *r.Pub)
 		}
 	}
 }
 
+var ErrConfirmTimeout = errors.New("RMQPublisher.PublishUntilConfirmed timed out waiting for confirms, republishing")
+
 // handleConfirms loops over the []PublishingResponse of a Publish call, checking if they have been acked every 5ms.
-func (p *RMQPublisher) handleConfirms(ctx context.Context, cfg PublishUntilConfirmedConfig, pubs []Publishing, pendConfirms []PublishingResponse) (unackedPubs []Publishing, err error) {
-	unackedPubs = pubs
+func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.Duration, pubs []Publishing, pendConfirms []PublishingResponse) (confirmed, unconfirmed []PublishingResponse, err error) {
+	unconfirmed = pendConfirms
 	defer func() {
-		// Delete acked Publishing's out of pubs and return that slice instead
+		// Remove the deleted confirms out of pendConfirms so they can be resent
 		i := 0
-		for _, pub := range unackedPubs {
-			// This technically disallows a client from sending an empty Publishing with PublishUntilConfirmed.
-			// If that is a valid use case for you, use Publish instead.
-			// Unsure why RabbitMQ even accepts a message without an Exchange and RoutingKey.
-			if pub.Exchange != "" || pub.RoutingKey != "" {
-				unackedPubs[i] = pub
+		for _, resp := range unconfirmed {
+			if resp.Pub != nil {
+				unconfirmed[i] = resp
 				i++
 			}
 		}
-		unackedPubs = unackedPubs[:i]
+		unconfirmed = unconfirmed[:i]
 	}()
 
-	confirmTimeoutChan := time.After(cfg.ConfirmTimeout)
-	confirms := 0
+	confirmed = make([]PublishingResponse, 0, len(pendConfirms))
+	confirmTimeoutChan := time.After(confirmTimeout)
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("RMQPublisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
+			return confirmed, unconfirmed, fmt.Errorf("RMQPublisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
 		case <-confirmTimeoutChan:
-			return pubs, nil
+			return confirmed, unconfirmed, ErrConfirmTimeout
 		case <-time.After(5 * time.Millisecond):
 		}
 
@@ -287,18 +288,15 @@ func (p *RMQPublisher) handleConfirms(ctx context.Context, cfg PublishUntilConfi
 
 			select {
 			case <-defConf.Done():
-				if defConf.Acked() || !cfg.RetryOnNack {
-					*defConf.Pub = Publishing{}
-				}
-				// Delete the current confirm so we don't check it again
-				confirms++
+				confirmed = append(confirmed, defConf)
+				// Delete the current confirm so we don't keep checking it over and over
 				pendConfirms[i] = PublishingResponse{}
 			default:
 			}
 		}
 		// Exit once all the PublishingResponse's have confirmed
-		if confirms == len(pubs) {
-			return pubs, nil
+		if len(confirmed) == len(pendConfirms) {
+			return confirmed, unconfirmed, nil
 		}
 	}
 }
