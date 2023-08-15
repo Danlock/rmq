@@ -91,8 +91,8 @@ func TestRMQPublisher(t *testing.T) {
 	mandatoryPub.Body = wantedPub.Body
 	immediatePub.Body = wantedPub.Body
 	returnedPub.Body = []byte("oops")
-	// TODO: figure out why returnedPub fails to get an amqp.Return depending on order
-	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, returnedPub, wantedPub, mandatoryPub, immediatePub)
+
+	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub, wantedPub, wantedPub, returnedPub, immediatePub, mandatoryPub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
 	}
@@ -105,6 +105,21 @@ func TestRMQPublisher(t *testing.T) {
 			t.Fatalf("got different return message")
 		}
 	}
+
+	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub, returnedPub)
+	if err != nil {
+		t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+	}
+
+	select {
+	case <-pubCtx.Done():
+		t.Fatalf("didnt get return")
+	case ret := <-returnChan:
+		if !reflect.DeepEqual(returnedPub.Body, ret.Body) {
+			t.Fatalf("got different return message")
+		}
+	}
+
 	// Cancel everything, now the publisher stopped processing
 	cancel()
 	_, err = rmqPub.Publish(context.Background(), wantedPub)

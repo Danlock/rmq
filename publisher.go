@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +21,16 @@ type Publishing struct {
 	RoutingKey string
 	Mandatory  bool
 	Immediate  bool
+}
+
+const pkgHeader = "github.com/danlock/rmq.RMQPublisher.PublishUntilAcked"
+
+// setID sets a field within the Publishing.Header within PublishUntilAcked for identifying and ignoring returned Publishing's.
+func (p *Publishing) setID(prefix string, index int) {
+	if p.Headers == nil {
+		p.Headers = make(amqp.Table, 1)
+	}
+	p.Headers[pkgHeader] = prefix + strconv.Itoa(index)
 }
 
 type PublisherConfig struct {
@@ -68,7 +81,8 @@ type RMQPublisher struct {
 	concurrentPubs atomic.Int64
 }
 
-// NewPublisher creates a RMQPublisher that will publish messages to AMQP, redialing on errors.
+// NewPublisher creates a RMQPublisher that will publish messages to AMQP on a single amqp.Channel at a time.
+// On any error such as Channel or Connection closes, it will get a new Channel, which redials AMQP if necessary.
 func NewPublisher(ctx context.Context, rmqConn *RMQConnection, config PublisherConfig) *RMQPublisher {
 	if ctx == nil {
 		panic("rmq.NewPublisher called with nil ctx")
@@ -168,6 +182,7 @@ var ErrTooManyPublishes = fmt.Errorf("Rejecting publish due to RMQPublisher.MaxC
 // Publish sends Publishings on RMQPublisher's current amqp.Channel.
 // Returns amqp.DefferedConfirmation's only if the RMQPublisher has Confirm set.
 // Publishings are sent until error. PublishingResponses contains successful publishes only.
+// If the AMQP Channel or Connection closes mid Publish, not all messages will be sent.
 func (p *RMQPublisher) Publish(ctx context.Context, pubs ...Publishing) ([]PublishingResponse, error) {
 	if len(pubs) == 0 {
 		return nil, nil
@@ -204,18 +219,18 @@ func (p *RMQPublisher) Publish(ctx context.Context, pubs ...Publishing) ([]Publi
 
 // PublishUntilConfirmed calls Publish and waits for the Publishings to be confirmed.
 // It republishes if a message isn't confirmed after ConfirmTimeout.
-// Returns []PublishingResponse which include the amqp.DefferredConfirmation for acked checks.
+// Returns []PublishingResponse which includes the amqp.DefferredConfirmation for the caller to check Acked().
 // Recommended to call with context.WithTimeout.
 func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, pubs ...Publishing) ([]PublishingResponse, error) {
 	logPrefix := "RMQPublisher.PublishUntilConfirmed"
 	if len(pubs) == 0 {
 		return nil, nil
 	}
+	if p.config.DontConfirm {
+		return nil, fmt.Errorf(logPrefix + " called on a RMQPublisher that's not in Confirm mode")
+	}
 
 	allConfirmed := make([]PublishingResponse, 0, len(pubs))
-	if p.config.DontConfirm {
-		return allConfirmed, fmt.Errorf(logPrefix + " called on a RMQPublisher that's not in Confirm mode")
-	}
 	if confirmTimeout <= 0 {
 		confirmTimeout = 5 * time.Minute
 	}
@@ -239,6 +254,7 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 
 		confirmed, unconfirmed, err := p.handleConfirms(ctx, confirmTimeout, pubs, pendConfirms)
 		allConfirmed = append(allConfirmed, confirmed...)
+		// finish once everything is confirmed, or if we got an unexpected error
 		if (err != nil && !errors.Is(err, ErrConfirmTimeout)) || len(allConfirmed) == pubsToConfirm {
 			return allConfirmed, err
 		}
@@ -246,9 +262,9 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 		p.config.Logf(logPrefix+" timed out waiting on %d confirms. Republishing...", len(unconfirmed))
 
 		// Make a new pubs slice and copy the Publishing's over so we don't mess with any confirmed PublishingResponse.Pub pointers
-		pubs = make([]Publishing, 0, len(unconfirmed))
-		for _, r := range unconfirmed {
-			pubs = append(pubs, *r.Pub)
+		pubs = make([]Publishing, len(unconfirmed))
+		for i, r := range unconfirmed {
+			pubs[i] = *r.Pub
 		}
 	}
 }
@@ -256,22 +272,10 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 var ErrConfirmTimeout = errors.New("RMQPublisher.PublishUntilConfirmed timed out waiting for confirms, republishing")
 
 // handleConfirms loops over the []PublishingResponse of a Publish call, checking if they have been acked every 5ms.
-func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.Duration, pubs []Publishing, pendConfirms []PublishingResponse) (confirmed, unconfirmed []PublishingResponse, err error) {
-	unconfirmed = pendConfirms
-	defer func() {
-		// Remove the deleted confirms out of pendConfirms so they can be resent
-		i := 0
-		for _, resp := range unconfirmed {
-			if resp.Pub != nil {
-				unconfirmed[i] = resp
-				i++
-			}
-		}
-		unconfirmed = unconfirmed[:i]
-	}()
-
-	confirmed = make([]PublishingResponse, 0, len(pendConfirms))
+func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.Duration, pubs []Publishing, unconfirmed []PublishingResponse) (confirmed, _ []PublishingResponse, err error) {
+	confirmed = make([]PublishingResponse, 0, len(unconfirmed))
 	confirmTimeoutChan := time.After(confirmTimeout)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -281,22 +285,109 @@ func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.D
 		case <-time.After(5 * time.Millisecond):
 		}
 
-		for i, defConf := range pendConfirms {
-			if defConf.Pub == nil {
-				continue
-			}
-
+		unconfirmed = slices.DeleteFunc(unconfirmed, func(pr PublishingResponse) bool {
 			select {
-			case <-defConf.Done():
-				confirmed = append(confirmed, defConf)
-				// Delete the current confirm so we don't keep checking it over and over
-				pendConfirms[i] = PublishingResponse{}
+			case <-pr.Done():
+				confirmed = append(confirmed, pr)
+				return true
 			default:
+				return false
 			}
-		}
+		})
+
 		// Exit once all the PublishingResponse's have confirmed
-		if len(confirmed) == len(pendConfirms) {
+		if len(unconfirmed) == 0 {
 			return confirmed, unconfirmed, nil
+		}
+	}
+}
+
+type PublishUntilAckedConfig struct {
+
+	// ConfirmTimeout defaults to 5 minutes
+	ConfirmTimeout time.Duration
+	// CorrelateReturn is used to correlate a Return and a Publishing so PublishUntilAcked can ignore their nacks.
+	// Must return an index within []Publishing that the amqp.Return correlates to or a -1.
+	// []Publishing will be a subset of the pubs passed into PublishUntilAcked
+	CorrelateReturn func(amqp.Return, []Publishing) int
+	ReturnChan      <-chan amqp.Return
+}
+
+// correlateReturn tries to grab a PublishUntilAcked header id out of an AMQP return, if it even exists.
+func (p *RMQPublisher) correlateReturn(prefix string) func(amqp.Return, []Publishing) int {
+	return func(ret amqp.Return, pubs []Publishing) int {
+		if ret.Headers == nil {
+			return -1
+		}
+		retID, ok := ret.Headers[pkgHeader].(string)
+		if !ok {
+			return -1
+		}
+		retIndex, err := strconv.Atoi(strings.TrimPrefix(retID, prefix))
+		if err != nil {
+			return -1
+		}
+		return retIndex
+	}
+}
+
+// PublishUntilAcked is like PublishUntilConfirmed, but it will republish nacked confirms. User discretion is advised.
+// Nacks can happen for a variety of reasons, ranging from user error (such as a mistyped exchange) or RabbitMQ internal error.
+// PublishUntilAcked will republish forever if your Publishing's are Mandatory or Immediate and their exchange doesn't exist, as one example.
+// Recommended to call with context.WithTimeout.
+// If ReturnChan is set, CorrelateReturn is used to ignore nacks from returned Publishing's.
+// If CorrelateReturn isn't set, an amqp.Publishing.Header field will be used by default.
+// On error, it will return []PublishingResponse containing Publishing's acked before the error occurred.
+func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, cfg PublishUntilAckedConfig, pubs ...Publishing) ([]PublishingResponse, error) {
+	// If we have a return chan, set a header field within each publishing so we can correlate a return with it's Publishing,
+	// unless the caller provided their own method of identifying Returns.
+	if cfg.ReturnChan != nil && cfg.CorrelateReturn == nil {
+		idPrefix := time.Now().Format(time.RFC3339Nano) + "|"
+		cfg.CorrelateReturn = p.correlateReturn(idPrefix)
+		for i, p := range pubs {
+			p.setID(idPrefix, i)
+		}
+	}
+
+	var returnIndexMu sync.Mutex
+	returnedIndexes := make(map[int]struct{})
+	if cfg.ReturnChan != nil {
+		returnCtx, returnCtxCancel := context.WithCancel(ctx)
+		defer returnCtxCancel()
+		go func() {
+			for {
+				select {
+				case <-returnCtx.Done():
+					return
+				case ret := <-cfg.ReturnChan:
+					retIndex := cfg.CorrelateReturn(ret, pubs)
+					if retIndex >= 0 && retIndex < len(pubs) {
+						returnIndexMu.Lock()
+						returnedIndexes[retIndex] = struct{}{}
+						returnIndexMu.Unlock()
+					}
+				}
+			}
+		}()
+	}
+
+	nackedPubs := pubs
+	ackedResps := make([]PublishingResponse, 0, len(pubs))
+	for {
+		pubResps, err := p.PublishUntilConfirmed(ctx, cfg.ConfirmTimeout, nackedPubs...)
+		// Copy the nacks to nackedPubs to be resent.
+		nackedPubs = make([]Publishing, 0)
+		pubResps = slices.DeleteFunc(pubResps, func(pr PublishingResponse) bool {
+			acked := pr.Acked()
+			if !acked {
+				nackedPubs = append(nackedPubs, *pr.Pub)
+			}
+			return !acked
+		})
+		ackedResps = append(ackedResps, pubResps...)
+
+		if err != nil || len(nackedPubs) == 0 {
+			return ackedResps, err
 		}
 	}
 }
