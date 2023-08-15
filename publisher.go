@@ -304,7 +304,6 @@ func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.D
 }
 
 type PublishUntilAckedConfig struct {
-
 	// ConfirmTimeout defaults to 5 minutes
 	ConfirmTimeout time.Duration
 	// CorrelateReturn is used to correlate a Return and a Publishing so PublishUntilAcked can ignore their nacks.
@@ -331,9 +330,39 @@ func (p *RMQPublisher) correlateReturn(prefix string) func(amqp.Return, []Publis
 	}
 }
 
+// storeReturns stores and provides returned indexes for PublishUntilAcked
+func (p *RMQPublisher) storeReturns(cfg PublishUntilAckedConfig, requestReturns chan internal.ChanReq[[]int], pubs []Publishing) {
+	returnedIndexMap := make(map[int]struct{})
+
+	for {
+		select {
+		case ret, ok := <-cfg.ReturnChan:
+			if !ok {
+				continue
+			}
+			retIndex := cfg.CorrelateReturn(ret, pubs)
+			if retIndex >= 0 && retIndex < len(pubs) {
+				returnedIndexMap[retIndex] = struct{}{}
+			}
+		case req, ok := <-requestReturns:
+			if !ok {
+				return
+			}
+			var resp internal.ChanResp[[]int]
+			if len(returnedIndexMap) > 0 {
+				resp.Val = make([]int, 0, len(returnedIndexMap))
+				for k := range returnedIndexMap {
+					resp.Val = append(resp.Val, k)
+				}
+			}
+			req.RespChan <- resp
+		}
+	}
+}
+
 // PublishUntilAcked is like PublishUntilConfirmed, but it will republish nacked confirms. User discretion is advised.
 // Nacks can happen for a variety of reasons, ranging from user error (mistyped exchange) or RabbitMQ internal errors.
-// PublishUntilAcked will republish a Mandatory Publishing with an nonexisting exchange forever (or until the exchange exists), as one example.
+// PublishUntilAcked will republish a Mandatory Publishing with a nonexistent exchange forever (or until the exchange exists), as one example.
 // PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or RabbitMQ node failures.
 // Recommended to call with context.WithTimeout.
 // If ReturnChan is set, CorrelateReturn is used to ignore nacks from returned Publishing's.
@@ -341,76 +370,59 @@ func (p *RMQPublisher) correlateReturn(prefix string) func(amqp.Return, []Publis
 // On error, it will return []PublishingResponse containing Publishing's acked before the error occurred.
 func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, cfg PublishUntilAckedConfig, pubs ...Publishing) ([]PublishingResponse, error) {
 	ignoringNackedReturns := cfg.ReturnChan != nil
-	// If we have a return chan, set a header field within each publishing so we can correlate a return with it's Publishing,
-	// unless the caller provided their own method of identifying Returns.
-	if ignoringNackedReturns && cfg.CorrelateReturn == nil {
-		idPrefix := time.Now().Format(time.RFC3339Nano) + "|"
-		cfg.CorrelateReturn = p.correlateReturn(idPrefix)
-		for i, p := range pubs {
-			p.setID(idPrefix, i)
-		}
-	}
-
-	var returnIndexMu sync.RWMutex
-	returnedIndexes := make(map[int]struct{})
+	requestReturns := make(chan internal.ChanReq[[]int], 1)
+	defer close(requestReturns)
 	if ignoringNackedReturns {
-		returnCtx, returnCtxCancel := context.WithCancel(ctx)
-		defer returnCtxCancel()
-		go func() {
-			for {
-				select {
-				case <-returnCtx.Done():
-					return
-				case ret := <-cfg.ReturnChan:
-					retIndex := cfg.CorrelateReturn(ret, pubs)
-					if retIndex >= 0 && retIndex < len(pubs) {
-						returnIndexMu.Lock()
-						returnedIndexes[retIndex] = struct{}{}
-						returnIndexMu.Unlock()
-					}
-				}
+		// If we have a ReturnChan, set a header field within each publishing so we can correlate amqp.Returns with their Publishing,
+		// unless the caller provided their own method of identifying Returns.
+		if cfg.CorrelateReturn == nil {
+			idPrefix := time.Now().Format(time.RFC3339Nano) + "|"
+			cfg.CorrelateReturn = p.correlateReturn(idPrefix)
+			for i, p := range pubs {
+				p.setID(idPrefix, i)
 			}
-		}()
+		}
+
+		go p.storeReturns(cfg, requestReturns, pubs)
 	}
 
 	pubsPointerMap := make(map[*Publishing]int, len(pubs))
 	for i := range pubs {
 		pubsPointerMap[&pubs[i]] = i
 	}
-	nackedPubs := pubs
 	ackedResps := make([]PublishingResponse, 0, len(pubs))
+	nackedPubs := pubs
 	for {
 		pubResps, err := p.PublishUntilConfirmed(ctx, cfg.ConfirmTimeout, nackedPubs...)
 
-		nackedPubResps := make([]PublishingResponse, 0)
-		pubResps = slices.DeleteFunc(pubResps, func(pr PublishingResponse) bool {
+		nackedResps := slices.DeleteFunc(pubResps, func(pr PublishingResponse) bool {
 			acked := pr.Acked()
-			if !acked {
-				nackedPubResps = append(nackedPubResps, pr)
+			if acked {
+				ackedResps = append(ackedResps, pr)
 			}
-			return !acked
+			return acked
 		})
-		ackedResps = append(ackedResps, pubResps...)
 
-		if err != nil || len(nackedPubs) == 0 {
+		if err != nil || len(nackedResps) == 0 {
 			return ackedResps, err
 		}
-		// If possible, disregard nacks that are from returned messages since they will just get sent over and over
+		// If possible, disregard nacks from returned messages since they will get republished forever
 		if ignoringNackedReturns {
-			returnIndexMu.RLock()
-			for retIndex := range returnedIndexes {
-				nackedPubResps = slices.DeleteFunc(nackedPubResps, func(pr PublishingResponse) bool {
+			req := internal.ChanReq[[]int]{Ctx: ctx, RespChan: make(chan internal.ChanResp[[]int], 1)}
+			requestReturns <- req
+			resp := <-req.RespChan
+			for retIndex := range resp.Val {
+				nackedResps = slices.DeleteFunc(nackedResps, func(pr PublishingResponse) bool {
 					return retIndex == pubsPointerMap[pr.Pub]
 				})
 			}
-			returnIndexMu.RUnlock()
 		}
 
-		if len(nackedPubResps) == 0 {
+		if len(nackedResps) == 0 {
 			return ackedResps, err
 		}
 
-		// prevent pubPointerMap from growing forever by removing dead pointers from last iteration's nackedPubs
+		// prevent pubPointerMap from growing forever by removing soon to be dead pointers to nackedPubs
 		if len(pubsPointerMap) > len(pubs) {
 			maps.DeleteFunc(pubsPointerMap, func(p *Publishing, i int) bool {
 				return p != &pubs[i]
@@ -418,8 +430,9 @@ func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, cfg PublishUntilAc
 		}
 
 		// Prepare to resend remaining nacks
-		nackedPubs = make([]Publishing, len(nackedPubResps))
-		for i, resp := range nackedPubResps {
+		p.config.Logf("RMQPublisher.PublishUntilAcked resending %d nacked Publishing's...", len(nackedResps))
+		nackedPubs = make([]Publishing, len(nackedResps))
+		for i, resp := range nackedResps {
 			nackedPubs[i] = *resp.Pub
 			pubsPointerMap[&nackedPubs[i]] = pubsPointerMap[resp.Pub]
 		}
