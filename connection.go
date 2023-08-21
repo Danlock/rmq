@@ -161,7 +161,7 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 			return
 		case err := <-notifyClose:
 			if err != nil {
-				c.config.Logf(logPrefix+" recieved close notification err: %+v", err)
+				c.config.Logf(logPrefix+" received close notification err: %+v", err)
 			}
 			return
 		case connReq := <-c.currentConReqChan:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,8 +34,8 @@ func (p *Publishing) setID(prefix string, index int) {
 }
 
 type PublisherConfig struct {
-	// NotifyReturn will recieve amqp.Return's from any amqp.Channel this RMQPublisher sends on.
-	NotifyReturn chan<- amqp.Return
+	// NotifyReturn will recieve []amqp.Return's from any amqp.Channel this RMQPublisher sends on.
+	NotifyReturn chan<- []amqp.Return
 
 	// DontConfirm will not set the amqp.Channel in Confirm mode, and disallow PublishUntilConfirmed.
 	DontConfirm bool
@@ -76,10 +75,12 @@ func (p *publishings) publish(mqChan *amqp.Channel, wg *sync.WaitGroup) {
 }
 
 type RMQPublisher struct {
-	ctx            context.Context
-	config         PublisherConfig
-	in             chan publishings
-	concurrentPubs atomic.Int64
+	ctx                 context.Context
+	config              PublisherConfig
+	concurrentPubs      atomic.Int64
+	in                  chan publishings
+	listeningForReturns chan bool
+	requestReturns      chan internal.ChanReq[[]amqp.Return]
 }
 
 // NewPublisher creates a RMQPublisher that will publish messages to AMQP on a single amqp.Channel at a time.
@@ -100,18 +101,23 @@ func NewPublisher(ctx context.Context, rmqConn *RMQConnection, config PublisherC
 	}
 
 	pub := &RMQPublisher{
-		ctx:    ctx,
-		config: config,
-		in:     make(chan publishings),
+		ctx:                 ctx,
+		config:              config,
+		in:                  make(chan publishings),
+		listeningForReturns: make(chan bool),
+		requestReturns:      make(chan internal.ChanReq[[]amqp.Return]),
 	}
-	go pub.connect(rmqConn)
+	returnChan := make(chan amqp.Return)
+	go pub.storeReturns(returnChan)
+	go pub.connect(rmqConn, returnChan)
 	return pub
 }
 
 // connect grabs an amqp.Channel from RMQConnection. It does so repeatedly on any error until it's context finishes.
-func (p *RMQPublisher) connect(rmqConn *RMQConnection) {
+func (p *RMQPublisher) connect(rmqConn *RMQConnection, returnChan chan amqp.Return) {
 	logPrefix := "RMQPublisher.connect"
 	var delay time.Duration
+
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -137,14 +143,12 @@ func (p *RMQPublisher) connect(rmqConn *RMQConnection) {
 		// Successfully got a channel for publishing, reset delay
 		delay = 0
 
-		// Spin off a goroutine that echos this amqp.Channel's Return until it closes
-		if p.config.NotifyReturn != nil {
-			go func() {
-				for r := range mqChan.NotifyReturn(make(chan amqp.Return, 2)) {
-					p.config.NotifyReturn <- r
-				}
-			}()
-		}
+		// Spin off a goroutine that echos this amqp.Channel's Returns until it closes
+		go func() {
+			for r := range mqChan.NotifyReturn(make(chan amqp.Return, 2)) {
+				returnChan <- r
+			}
+		}()
 
 		p.listen(mqChan)
 	}
@@ -236,10 +240,11 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 		confirmTimeout = 5 * time.Minute
 	}
 
-	pubsToConfirm := len(pubs)
 	var pubDelay time.Duration
+	unconfirmedPubs := pubs
 	for {
-		pendConfirms, err := p.Publish(ctx, pubs...)
+		pubStart := time.Now()
+		pendConfirms, err := p.Publish(ctx, unconfirmedPubs...)
 		if err != nil {
 			pubDelay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, pubDelay)
 			p.config.Logf(logPrefix+" got a Publish error. Republishing after %s due to %v", pubDelay.String(), err)
@@ -253,19 +258,29 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 		// Succesfully published, so reset the delay
 		pubDelay = 0
 
-		confirmed, unconfirmed, err := p.handleConfirms(ctx, confirmTimeout, pubs, pendConfirms)
+		confirmed, unconfirmed, err := p.handleConfirms(ctx, confirmTimeout, pendConfirms)
 		allConfirmed = append(allConfirmed, confirmed...)
 		// finish once everything is confirmed, or if we got an unexpected error
-		if (err != nil && !errors.Is(err, ErrConfirmTimeout)) || len(allConfirmed) == pubsToConfirm {
+		if (err != nil && !errors.Is(err, ErrConfirmTimeout)) || len(unconfirmed) == 0 {
 			return allConfirmed, err
 		}
 
-		p.config.Logf(logPrefix+" timed out waiting on %d confirms. Republishing...", len(unconfirmed))
+		p.config.Logf(logPrefix+" timed out waiting on confirms after %s. Republishing %d unconfirmed Publishing's...", time.Since(pubStart), len(unconfirmed))
 
 		// Make a new pubs slice and copy the Publishing's over so we don't mess with any confirmed PublishingResponse.Pub pointers
-		pubs = make([]Publishing, len(unconfirmed))
-		for i, r := range unconfirmed {
-			pubs[i] = *r.Pub
+		if &unconfirmedPubs[0] == &pubs[0] {
+			unconfirmedPubs = make([]Publishing, len(unconfirmed))
+			for i, r := range unconfirmed {
+				unconfirmedPubs[i] = *r.Pub
+			}
+		} else {
+			for i := 0; i < len(unconfirmedPubs); i++ {
+				for _, resp := range confirmed {
+					if &unconfirmedPubs[i] == resp.Pub {
+						unconfirmedPubs = slices.Delete(unconfirmedPubs, i, i+1)
+					}
+				}
+			}
 		}
 	}
 }
@@ -273,7 +288,7 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 var ErrConfirmTimeout = errors.New("RMQPublisher.PublishUntilConfirmed timed out waiting for confirms, republishing")
 
 // handleConfirms loops over the []PublishingResponse of a Publish call, checking if they have been acked every 5ms.
-func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.Duration, pubs []Publishing, unconfirmed []PublishingResponse) (confirmed, _ []PublishingResponse, err error) {
+func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.Duration, unconfirmed []PublishingResponse) (confirmed, _ []PublishingResponse, err error) {
 	confirmed = make([]PublishingResponse, 0, len(unconfirmed))
 	confirmTimeoutChan := time.After(confirmTimeout)
 
@@ -303,13 +318,69 @@ func (p *RMQPublisher) handleConfirms(ctx context.Context, confirmTimeout time.D
 	}
 }
 
+// storeReturns stores and provides returned indexes for PublishUntilAcked, and echos them on NotifyReturn if set.
+func (p *RMQPublisher) storeReturns(returnChan <-chan amqp.Return) {
+	returns := make([]amqp.Return, 0)
+	returnsToEcho := make([]amqp.Return, 0)
+
+	listeners := 0
+	for {
+		select {
+		case <-p.ctx.Done():
+			// storeReturns shuts down once it has no listeners and the RMQPublisher context has cancelled.
+			if listeners == 0 {
+				return
+			}
+		case ret := <-returnChan:
+			if listeners > 0 {
+				returns = append(returns, ret)
+			}
+			if p.config.NotifyReturn != nil {
+				// Try not to repeat streadway/amqp's mistake of deadlocking if a client isn't listening to their Notify* channel.
+				// Return our stored returns to the caller if they're listening, if not try again next return.
+				// returnsToEcho could grow forever if the client never listens to the NotifyReturn chan they provided us, but that is acceptable for misbehaving callers.
+				returnsToEcho = append(returnsToEcho, ret)
+				select {
+				case p.config.NotifyReturn <- returnsToEcho:
+					returnsToEcho = make([]amqp.Return, 0)
+				default:
+				}
+			}
+		case req := <-p.requestReturns:
+			var resp internal.ChanResp[[]amqp.Return]
+			if len(returns) > 0 {
+				resp.Val = make([]amqp.Return, len(returns))
+				copy(resp.Val, returns)
+			}
+			req.RespChan <- resp
+		case listening := <-p.listeningForReturns:
+			if listening {
+				listeners++
+			} else {
+				listeners--
+
+				if listeners == 0 {
+					if p.ctx.Err() != nil {
+						return
+					}
+
+					if len(returns) > 0 {
+						returns = returns[0:0]
+					}
+				}
+			}
+
+		}
+	}
+}
+
 type PublishUntilAckedConfig struct {
 	// ConfirmTimeout defaults to 5 minutes
 	ConfirmTimeout time.Duration
-	// CorrelateReturn is used to correlate a Return and a Publishing so PublishUntilAcked can ignore their nacks.
-	// Must return an index within []Publishing that the amqp.Return correlates to or a -1.
+	// CorrelateReturn is used to correlate a Return and a Publishing so PublishUntilAcked won't republish them..
+	// Must return an index within []Publishing that the amqp.Return correlates to or a -1 if it doesn't correlate to any.
+	// Also must not mutate []Publishing.
 	CorrelateReturn func(amqp.Return, []Publishing) int
-	ReturnChan      <-chan amqp.Return
 }
 
 // correlateReturn tries to grab a PublishUntilAcked header id out of an AMQP return, if it even exists.
@@ -330,60 +401,36 @@ func (p *RMQPublisher) correlateReturn(prefix string) func(amqp.Return, []Publis
 	}
 }
 
-// storeReturns stores and provides returned indexes for PublishUntilAcked
-func (p *RMQPublisher) storeReturns(cfg PublishUntilAckedConfig, requestReturns chan internal.ChanReq[[]int], pubs []Publishing) {
-	returnedIndexMap := make(map[int]struct{})
-
-	for {
-		select {
-		case ret, ok := <-cfg.ReturnChan:
-			if !ok {
-				continue
-			}
-			retIndex := cfg.CorrelateReturn(ret, pubs)
-			if retIndex >= 0 && retIndex < len(pubs) {
-				returnedIndexMap[retIndex] = struct{}{}
-			}
-		case req, ok := <-requestReturns:
-			if !ok {
-				return
-			}
-			var resp internal.ChanResp[[]int]
-			if len(returnedIndexMap) > 0 {
-				resp.Val = make([]int, 0, len(returnedIndexMap))
-				for k := range returnedIndexMap {
-					resp.Val = append(resp.Val, k)
-				}
-			}
-			req.RespChan <- resp
-		}
-	}
-}
-
-// PublishUntilAcked is like PublishUntilConfirmed, but it will republish nacked confirms. User discretion is advised.
+// PublishUntilAcked is like PublishUntilConfirmed, but it republishes nacked confirms. User discretion is advised.
+//
 // Nacks can happen for a variety of reasons, ranging from user error (mistyped exchange) or RabbitMQ internal errors.
-// PublishUntilAcked will republish a Mandatory Publishing with a nonexistent exchange forever (or until the exchange exists), as one example.
-// PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or RabbitMQ node failures.
+//
+// PublishUntilAcked will republish a Mandatory Publishing with a nonexistent exchange forever (until the exchange exists), as one example.
+// PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or temporary RabbitMQ node failures.
 // Recommended to call with context.WithTimeout.
-// If ReturnChan is set, CorrelateReturn is used to ignore nacks from returned Publishing's.
-// If CorrelateReturn isn't set, an amqp.Publishing.Header field will be used by default.
+//
+// If CorrelateReturn isn't set, an amqp.Publishing.Header field will be used to correlate amqp.Return's by default.
 // On error, it will return []PublishingResponse containing Publishing's acked before the error occurred.
 func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, cfg PublishUntilAckedConfig, pubs ...Publishing) ([]PublishingResponse, error) {
-	ignoringNackedReturns := cfg.ReturnChan != nil
-	requestReturns := make(chan internal.ChanReq[[]int], 1)
-	defer close(requestReturns)
-	if ignoringNackedReturns {
-		// If we have a ReturnChan, set a header field within each publishing so we can correlate amqp.Returns with their Publishing,
-		// unless the caller provided their own method of identifying Returns.
-		if cfg.CorrelateReturn == nil {
-			idPrefix := time.Now().Format(time.RFC3339Nano) + "|"
-			cfg.CorrelateReturn = p.correlateReturn(idPrefix)
-			for i, p := range pubs {
-				p.setID(idPrefix, i)
-			}
-		}
+	if len(pubs) == 0 {
+		return nil, nil
+	}
 
-		go p.storeReturns(cfg, requestReturns, pubs)
+	select {
+	case <-p.ctx.Done():
+		return nil, ctx.Err()
+	case p.listeningForReturns <- true:
+	}
+
+	defer func() { p.listeningForReturns <- false }()
+
+	if cfg.CorrelateReturn == nil {
+		// unique "enough" prefix for callers without a CorrelateReturn
+		idPrefix := fmt.Sprint(time.Now().Format(time.RFC3339Nano), "|", &pubs, "|")
+		cfg.CorrelateReturn = p.correlateReturn(idPrefix)
+		for i, p := range pubs {
+			p.setID(idPrefix, i)
+		}
 	}
 
 	pubsPointerMap := make(map[*Publishing]int, len(pubs))
@@ -406,31 +453,33 @@ func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, cfg PublishUntilAc
 		if err != nil || len(nackedResps) == 0 {
 			return ackedResps, err
 		}
-		// If possible, disregard nacks from returned messages since they will get republished forever
-		if ignoringNackedReturns {
-			req := internal.ChanReq[[]int]{Ctx: ctx, RespChan: make(chan internal.ChanResp[[]int], 1)}
-			requestReturns <- req
-			resp := <-req.RespChan
-			for retIndex := range resp.Val {
-				nackedResps = slices.DeleteFunc(nackedResps, func(pr PublishingResponse) bool {
-					return retIndex == pubsPointerMap[pr.Pub]
-				})
+
+		// Get returns from the storeReturns goroutine and run cfg.CorrelateReturns on them, then delete them out of nackedResps.
+		req := internal.ChanReq[[]amqp.Return]{Ctx: ctx, RespChan: make(chan internal.ChanResp[[]amqp.Return], 1)}
+		p.requestReturns <- req
+		resp := <-req.RespChan
+
+		var returnedIndexes map[int]struct{}
+		for _, ret := range resp.Val {
+			retIndex := cfg.CorrelateReturn(ret, pubs)
+			if retIndex >= 0 && retIndex < len(pubs) {
+				returnedIndexes[retIndex] = struct{}{}
 			}
 		}
+
+		nackedResps = slices.DeleteFunc(nackedResps, func(pr PublishingResponse) bool {
+			_, ok := returnedIndexes[pubsPointerMap[pr.Pub]]
+			return ok
+		})
 
 		if len(nackedResps) == 0 {
 			return ackedResps, err
 		}
 
-		// prevent pubPointerMap from growing forever by removing soon to be dead pointers to nackedPubs
-		if len(pubsPointerMap) > len(pubs) {
-			maps.DeleteFunc(pubsPointerMap, func(p *Publishing, i int) bool {
-				return p != &pubs[i]
-			})
-		}
-
-		// Prepare to resend remaining nacks
 		p.config.Logf("RMQPublisher.PublishUntilAcked resending %d nacked Publishing's...", len(nackedResps))
+
+		// Resend remaining nacks in a new slice.
+		// TODO: this could be done more efficiently. Mutating pubs would require changing the default p.correlateReturns as well.
 		nackedPubs = make([]Publishing, len(nackedResps))
 		for i, resp := range nackedResps {
 			nackedPubs[i] = *resp.Pub

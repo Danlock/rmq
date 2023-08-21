@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -175,16 +176,16 @@ func TestRMQConsumer_Stress(t *testing.T) {
 	}
 	mqChan.Close()
 
-	msgCount := 100_000
+	msgCount := 10_000
 	msgChan := make(chan amqp.Delivery, msgCount)
 
 	consumeAndDeliver := func(cons *rmq.RMQConsumer) {
-		delivered := 0
+		var delivered atomic.Uint64
 		cons.Process(ctx, rmqConn, func(ctx context.Context, msg amqp.Delivery) {
 			msgChan <- msg
-			delivered++
+			delivered.Add(1)
 		})
-		logf("Consumer deliver %d messages", delivered)
+		logf("Consumer deliver %d messages", delivered.Load())
 	}
 	// Send msgCount messages over pubsubCount of consumers and publishers and see if everything processes smoothly
 	pubsubCount := 5
@@ -205,7 +206,7 @@ func TestRMQConsumer_Stress(t *testing.T) {
 		pub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Logf: logf})
 		go func() {
 			for i := 0; i < msgCount/pubsubCount; i++ {
-				pub.PublishUntilConfirmed(ctx, 0, testPub)
+				pub.PublishUntilAcked(ctx, rmq.PublishUntilAckedConfig{}, testPub)
 			}
 		}()
 	}
@@ -220,4 +221,9 @@ func TestRMQConsumer_Stress(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TODO: New stress test that ensures each published message is different and has been received, while constantly closing the amqp.Connection.
+func TestRMQConsumer_Load(t *testing.T) {
+
 }

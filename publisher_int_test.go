@@ -15,7 +15,7 @@ import (
 )
 
 func TestRMQPublisher(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	logf := internal.LogTillCtx(t, ctx)
@@ -28,7 +28,7 @@ func TestRMQPublisher(t *testing.T) {
 		t.Fatalf("PublishUntilConfirmed succeeded despite the publisher set dont confirm")
 	}
 
-	returnChan := make(chan amqp.Return, 5)
+	returnChan := make(chan []amqp.Return, 5)
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
 		Logf:                   logf,
 		NotifyReturn:           returnChan,
@@ -64,8 +64,8 @@ func TestRMQPublisher(t *testing.T) {
 	select {
 	case <-pubCtx.Done():
 		t.Fatalf("didnt get return")
-	case ret := <-returnChan:
-		if !reflect.DeepEqual(retPub.Body, ret.Body) {
+	case returns := <-returnChan:
+		if !reflect.DeepEqual(retPub.Body, returns[0].Body) {
 			t.Fatalf("got different return message")
 		}
 	}
@@ -100,22 +100,22 @@ func TestRMQPublisher(t *testing.T) {
 	select {
 	case <-pubCtx.Done():
 		t.Fatalf("didnt get return")
-	case ret := <-returnChan:
-		if !reflect.DeepEqual(returnedPub.Body, ret.Body) {
+	case returns := <-returnChan:
+		if !reflect.DeepEqual(returnedPub.Body, returns[0].Body) {
 			t.Fatalf("got different return message")
 		}
 	}
 
-	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub, returnedPub)
+	_, err = rmqPub.PublishUntilAcked(pubCtx, rmq.PublishUntilAckedConfig{}, wantedPub, returnedPub, returnedPub)
 	if err != nil {
-		t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+		t.Fatalf("PublishUntilAcked returned unexpected error %v", err)
 	}
 
 	select {
 	case <-pubCtx.Done():
 		t.Fatalf("didnt get return")
-	case ret := <-returnChan:
-		if !reflect.DeepEqual(returnedPub.Body, ret.Body) {
+	case returns := <-returnChan:
+		if !reflect.DeepEqual(returnedPub.Body, returns[0].Body) {
 			t.Fatalf("got different return message")
 		}
 	}

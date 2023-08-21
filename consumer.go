@@ -234,7 +234,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", context.Cause(ctx))
 	case r := <-respChan:
 		// Set our consumer's queue name in case of an anonymous queue which would have left c.Config.Queue.Name blank
-		if r.queue.Name != "" {
+		if c.config.Queue.Name == "" && r.queue.Name != "" {
 			c.config.Queue.Name = r.queue.Name
 		}
 		return mqChan, r.err
