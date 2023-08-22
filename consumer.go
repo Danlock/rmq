@@ -27,9 +27,6 @@ type ConsumerConfig struct {
 	Logf func(msg string, args ...any)
 	// *RetryInterval controls how frequently RMQConsumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
-	// ProcessSkipDeclare makes Process not Declare the topology on reconnects. Beware of setting this with auto delete or queue/exchange TTL.
-	// Declare should be called by the user before Process, or at least Queue.Name should be a pre existing queue.
-	ProcessSkipDeclare bool
 }
 
 // ConsumerExchange are args for amqp.Channel.ExchangeDeclare
@@ -296,8 +293,8 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 
 // Process uses the RMQConsumer config to repeatedly Declare and Consume from an AMQP queue, processing each message concurrently with deliveryProcessor.
 // Qos.PrefetchCount can be used to set a limit on the goroutines spawned, since they are per message.
-// On any error Process will reconnect to AMQP, redeclare it's topology (unless ProcessSkipDeclare) and resume consumption of messages.
-// Blocks until it's context is finished, so call it in a goroutine.
+// On any error Process will reconnect to AMQP, redeclare it's topology and resume consumption of messages.
+// Blocks until it's context is finished.
 func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := fmt.Sprintf("RMQConsumer.Process for queue %s", c.config.Queue.Name)
 
@@ -311,11 +308,7 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 		case <-time.After(delay):
 		}
 
-		if c.config.ProcessSkipDeclare {
-			mqChan, err = rmqConn.Channel(ctx)
-		} else {
-			mqChan, err = c.Declare(ctx, rmqConn)
-		}
+		mqChan, err = c.Declare(ctx, rmqConn)
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
 			c.config.Logf(logPrefix+" failed to acquire amqp.Channel. Retrying in %s due to %v", delay.String(), err)
