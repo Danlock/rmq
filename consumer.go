@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -23,8 +24,8 @@ type ConsumerConfig struct {
 	// AMQPTimeout sets a timeout on all AMQP requests.
 	// Defaults to 30 seconds.
 	AMQPTimeout time.Duration
-	// Set Logf with your favorite logging library
-	Logf func(msg string, args ...any)
+	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
+	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 	// *RetryInterval controls how frequently RMQConsumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
 }
@@ -87,9 +88,8 @@ func NewConsumer(config ConsumerConfig) *RMQConsumer {
 	if config.AMQPTimeout == 0 {
 		config.AMQPTimeout = 30 * time.Second
 	}
-	if config.Logf == nil {
-		config.Logf = func(msg string, args ...any) {}
-	}
+	internal.WrapLogFunc(&config.Log)
+
 	if config.MinRetryInterval == 0 {
 		config.MinRetryInterval = time.Second / 8
 	}
@@ -117,7 +117,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", mqChanErr)
+				err = errors.Join(err, mqChanErr)
 			}
 		}
 	}()
@@ -203,7 +203,6 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 			if err != nil {
 				err = fmt.Errorf(
 					logPrefix+" unable to bind queue to exchange '%s' via key '%s' due to %w",
-					queue.Name,
 					b.ExchangeName,
 					b.RoutingKey,
 					err,
@@ -226,7 +225,7 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 		go func() {
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
-			c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
+			c.config.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
 		}()
 		return nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", context.Cause(ctx))
 	case r := <-respChan:
@@ -251,7 +250,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 		if err != nil {
 			mqChanErr := mqChan.Close()
 			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to close the amqp.Channel due to err %+v", mqChanErr)
+				err = errors.Join(err, mqChanErr)
 			}
 		}
 	}()
@@ -282,7 +281,7 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
 			r := <-respChan
 			if r.err != nil {
-				c.config.Logf(logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
+				c.config.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.err)
 			}
 		}()
 		return nil, fmt.Errorf(logPrefix+" context ended before it finished due to %w", context.Cause(ctx))
@@ -311,14 +310,14 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 		mqChan, err = c.Declare(ctx, rmqConn)
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
-			c.config.Logf(logPrefix+" failed to acquire amqp.Channel. Retrying in %s due to %v", delay.String(), err)
+			c.config.Log(ctx, slog.LevelError, logPrefix+" failed to Declare. Retrying in %s due to %v", delay.String(), err)
 			continue
 		}
 
 		msgChan, err := c.Consume(ctx, mqChan)
 		if err != nil {
 			delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
-			c.config.Logf(logPrefix+" failed to Consume. Retrying in %s due to %v", delay.String(), err)
+			c.config.Log(ctx, slog.LevelError, logPrefix+" failed to Consume. Retrying in %s due to %v", delay.String(), err)
 			continue
 		}
 		// Successfully redeclared our topology, so reset the backoff
@@ -337,13 +336,13 @@ func (c *RMQConsumer) processDeliveries(ctx context.Context, mqChan *amqp.Channe
 		case <-ctx.Done():
 			consGroup.Wait()
 			if err := mqChan.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to Close it's AMQP channel due to %v", err)
+				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to Close it's AMQP channel due to %v", err)
 				// Typically we exit processDeliveries by waiting for the msgChan to close, but if we can't close the mqChan then abandon ship
 				return
 			}
 		case err := <-closeNotifier:
 			if err != nil {
-				c.config.Logf(logPrefix+" got an AMQP Channel Close error %+v", err)
+				c.config.Log(ctx, slog.LevelError, logPrefix+" got an AMQP Channel Close error %+v", err)
 			}
 		case msg, ok := <-msgChan:
 			if !ok {

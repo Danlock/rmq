@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -30,6 +30,9 @@ func (m *MockAMQPConnection) NotifyClose(receiver chan *amqp.Error) chan *amqp.E
 	return receiver
 }
 func (m *MockAMQPConnection) LocalAddr() net.Addr {
+	return &net.UnixAddr{"MockAMQPConnection", "unix"}
+}
+func (m *MockAMQPConnection) RemoteAddr() net.Addr {
 	return &net.UnixAddr{"MockAMQPConnection", "unix"}
 }
 func (m *MockAMQPConnection) Close() error {
@@ -116,7 +119,7 @@ func TestRMQConnection_Channel(t *testing.T) {
 	defer cancel()
 
 	connConf := ConnectConfig{
-		Logf: internal.LogTillCtx(t, ctx),
+		Log: slog.Log,
 	}
 	goodRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return goodMockAMQP, nil
@@ -127,7 +130,7 @@ func TestRMQConnection_Channel(t *testing.T) {
 	slowRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
-	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Logf: internal.LogTillCtx(t, ctx), AMQPChannelTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
+	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Log: slog.Log, AMQPChannelTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
 
@@ -174,7 +177,7 @@ func TestRMQConnection_Channel(t *testing.T) {
 	}
 
 	connConf = ConnectConfig{
-		Logf:              connConf.Logf,
+		Log:               connConf.Log,
 		MinRedialInterval: time.Millisecond,
 		MaxRedialInterval: 3 * time.Millisecond,
 	}

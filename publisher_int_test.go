@@ -4,14 +4,13 @@ package rmq_test
 
 import (
 	"context"
-	"errors"
+	"log/slog"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/danlock/rmq"
-	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -19,9 +18,9 @@ func TestRMQPublisher(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	logf := internal.LogTillCtx(t, ctx)
+	logf := slog.Log
 
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
 	_, err := unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, rmq.Publishing{})
@@ -31,7 +30,7 @@ func TestRMQPublisher(t *testing.T) {
 
 	returnChan := make(chan amqp.Return, 5)
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
-		Logf:         logf,
+		Log:          logf,
 		NotifyReturn: returnChan,
 	})
 	forceRedial := func() {
@@ -75,7 +74,7 @@ func TestRMQPublisher(t *testing.T) {
 	errChan := make(chan error, pubCount)
 	for i := 0; i < pubCount; i++ {
 		go func() {
-			errChan <- rmqPub.PublishUntilAcked(pubCtx, rmq.PublishUntilAckedConfig{}, wantedPub)
+			errChan <- rmqPub.PublishUntilAcked(pubCtx, 0, wantedPub)
 		}()
 	}
 	for i := 0; i < pubCount; i++ {
@@ -105,12 +104,12 @@ func TestRMQPublisher(t *testing.T) {
 		t.Fatalf("PublishUntilConfirmed returned unexpected ack for immediate pub")
 	}
 
-	returnedPub := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "idontexist", Mandatory: true}
+	returnedPub := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "whereverhueyislooking", Mandatory: true}
 	returnedPub.Body = []byte("oops")
 
-	err = rmqPub.PublishUntilAcked(pubCtx, rmq.PublishUntilAckedConfig{}, returnedPub)
-	if !errors.Is(err, rmq.ErrPublishReturned) {
-		t.Fatalf("PublishUntilAcked returned unexpected error for return %v", err)
+	err = rmqPub.PublishUntilAcked(pubCtx, 0, returnedPub)
+	if err != nil {
+		t.Fatalf("PublishUntilAcked got err for return %v", err)
 	}
 
 	select {
@@ -122,7 +121,7 @@ func TestRMQPublisher(t *testing.T) {
 		}
 	}
 
-	err = rmqPub.PublishUntilAcked(pubCtx, rmq.PublishUntilAckedConfig{}, wantedPub)
+	err = rmqPub.PublishUntilAcked(pubCtx, 0, wantedPub)
 	if err != nil {
 		t.Fatalf("PublishUntilAcked returned unexpected error %v", err)
 	}
@@ -138,7 +137,7 @@ func TestRMQPublisher(t *testing.T) {
 		t.Fatalf("PublishUntilConfirmed shouldn't succeed")
 	}
 
-	err = rmqPub.PublishUntilAcked(ctx, rmq.PublishUntilAckedConfig{}, wantedPub)
+	err = rmqPub.PublishUntilAcked(ctx, 0, wantedPub)
 	if err == nil {
 		t.Fatalf("PublishUntilAcked shouldn't succeed")
 	}

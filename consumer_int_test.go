@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"reflect"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/danlock/rmq"
-	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -23,9 +23,9 @@ func TestRMQConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	logf := internal.LogTillCtx(t, ctx)
+	logf := slog.Log
 
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	baseConsConfig := rmq.ConsumerConfig{
 		Exchanges: []rmq.ConsumerExchange{{
@@ -43,7 +43,7 @@ func TestRMQConsumer(t *testing.T) {
 		Consume: rmq.ConsumerConsume{
 			Consumer: "TestRMQConsumerBase",
 		},
-		Logf: logf,
+		Log: logf,
 	}
 	baseConsumer := rmq.NewConsumer(baseConsConfig)
 	mqChan, err := baseConsumer.Declare(ctx, rmqConn)
@@ -79,9 +79,9 @@ func TestRMQConsumer(t *testing.T) {
 		_ = msg.Ack(false)
 	})
 
-	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true, Logf: logf})
+	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true, Log: logf})
 	unreliableRMQPub.Publish(ctx, rmq.Publishing{Exchange: "amq.fanout"})
-	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Logf: logf})
+	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: logf})
 
 	forceRedial := func() {
 		amqpConn, err := rmqConn.CurrentConnection(ctx)
@@ -101,8 +101,7 @@ func TestRMQConsumer(t *testing.T) {
 	errChan := make(chan error, pubCount)
 	for i := 0; i < pubCount; i++ {
 		go func() {
-			_, err := rmqPub.PublishUntilConfirmed(pubCtx, 0, wantedPub)
-			errChan <- err
+			errChan <- rmqPub.PublishUntilAcked(pubCtx, 0, wantedPub)
 		}()
 	}
 	forceRedial()
@@ -132,9 +131,9 @@ func TestRMQConsumer_Load(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute/2)
 	defer cancel()
 
-	logf := internal.LogTillCtx(t, ctx)
+	logf := slog.Log
 
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Logf: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	periodicallyCloseConn := func() {
 		for {
@@ -166,7 +165,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 		Consume: rmq.ConsumerConsume{
 			Consumer: baseName,
 		},
-		Logf: logf,
+		Log: logf,
 	}
 	// Here we Declare our Consumer's before Process is called in another goroutine, to ensure published messages will be placed on a queue.
 	mqChan, err := rmq.NewConsumer(baseConsConfig).Declare(ctx, rmqConn)
@@ -189,7 +188,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 	mqChan.Close()
 
 	consumers := []rmq.ConsumerConfig{baseConsConfig, prefetchConsConfig}
-	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{ /*Logf: logf*/ })
+	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{ /*Log: logf*/ })
 
 	msgCount := 25_000
 	errChan := make(chan error, (msgCount+1)*len(consumers))
@@ -209,14 +208,14 @@ func TestRMQConsumer_Load(t *testing.T) {
 				consMu.Lock()
 				defer consMu.Unlock()
 				if err != nil {
-					logf("%s got %d msgs", c.Queue.Name, msgRecv)
+					logf(ctx, slog.LevelError, "%s got %d msgs", c.Queue.Name, msgRecv)
 					errChan <- err
 					cancel()
 				} else {
 					msgRecv++
 					receives[index] = struct{}{}
 					if len(receives) == msgCount {
-						logf("%s got %d msgs", c.Queue.Name, msgRecv)
+						logf(ctx, slog.LevelError, "%s got %d msgs", c.Queue.Name, msgRecv)
 						errChan <- nil
 						cancel()
 					}
@@ -225,9 +224,10 @@ func TestRMQConsumer_Load(t *testing.T) {
 		}()
 		go func() {
 			// Send half of the messages in parallel, then the rest serially
+			// The listen() goroutine will serially execute all of these publishes anyway. Even the underlying *amqp.Channel will lock it's mutex on publishes.
 			for i := 0; i < msgCount/2; i++ {
 				go func(i int) {
-					errChan <- publisher.PublishUntilAcked(ctx, rmq.PublishUntilAckedConfig{}, rmq.Publishing{
+					errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
 						Exchange:   c.Bindings[0].ExchangeName,
 						RoutingKey: c.Bindings[0].RoutingKey,
 						Mandatory:  true,
@@ -238,7 +238,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 				}(i)
 			}
 			for i := msgCount / 2; i < msgCount; i++ {
-				errChan <- publisher.PublishUntilAcked(ctx, rmq.PublishUntilAckedConfig{}, rmq.Publishing{
+				errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
 					Exchange:   c.Bindings[0].ExchangeName,
 					RoutingKey: c.Bindings[0].RoutingKey,
 					Mandatory:  true,

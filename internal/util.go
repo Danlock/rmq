@@ -2,7 +2,10 @@ package internal
 
 import (
 	"context"
+	"fmt"
 	"time"
+
+	"log/slog"
 )
 
 type ChanReq[T any] struct {
@@ -24,16 +27,18 @@ func CalculateDelay(min, max, current time.Duration) time.Duration {
 	}
 }
 
-type testingT interface {
-	Helper()
-	Logf(format string, args ...any)
-}
-
-func LogTillCtx(t testingT, ctx context.Context) func(string, ...any) {
-	return func(s string, a ...any) {
-		if ctx.Err() == nil {
-			t.Helper()
-			t.Logf(time.Now().Format(time.RFC3339Nano)+": "+s, a...)
+// WrapLogFunc runs fmt.Sprintf on the msg, args parameters so the end user can use slog.Log or any other logging library more interchangably
+// danlock/rmq won't send the args parameter to the user provided Log func, but the end user can take advantage of slog.Level to ignore warnings, and we don't need to add any dependencies.
+// This does mean calldepth loggers will need a +1 however.
+func WrapLogFunc(logFunc *func(ctx context.Context, level slog.Level, msg string, args ...any)) {
+	if logFunc == nil {
+		panic("WrapLogFunc takes a pointer")
+	} else if *logFunc == nil {
+		*logFunc = func(ctx context.Context, level slog.Level, msg string, args ...any) {}
+	} else {
+		userLog := *logFunc
+		*logFunc = func(ctx context.Context, level slog.Level, msg string, args ...any) {
+			userLog(ctx, level, fmt.Sprintf(msg, args...))
 		}
 	}
 }

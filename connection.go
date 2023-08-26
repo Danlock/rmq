@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"time"
 
@@ -16,6 +17,7 @@ type AMQPConnection interface {
 	Channel() (*amqp.Channel, error)
 	NotifyClose(receiver chan *amqp.Error) chan *amqp.Error
 	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
 	Close() error
 }
 
@@ -25,8 +27,8 @@ type ConnectConfig struct {
 	AMQPChannelTimeout time.Duration
 	// *RedialInterval are used to implement backoff when dialing AMQP. Defaults to 0.125 seconds to 32 seconds.
 	MinRedialInterval, MaxRedialInterval time.Duration
-	// Set Logf with your favorite logging library
-	Logf func(msg string, args ...any)
+	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
+	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
 func ConnectWithAMQPConfig(ctx context.Context, conf ConnectConfig, amqpURL string, amqpConf amqp.Config) *RMQConnection {
@@ -38,16 +40,14 @@ func ConnectWithAMQPConfig(ctx context.Context, conf ConnectConfig, amqpURL stri
 
 // Connect returns a resilient, redialable AMQP connection.
 // This connection will redial until it's context is canceled.
-// Calling code should repeatedly call the Channel() function on any errors.
-// That will trigger RMQConnection to either return a Channel or redial for a new connection.
+// User's should repeatedly call the Channel() function on any errors from their amqp.Channel.
+// That will trigger RMQConnection to either return a new  amqp.Channel or redial for a new AMQP Connection.
 func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnection, error)) *RMQConnection {
 	if dialFn == nil || ctx == nil {
 		panic("Connect requires a ctx and a dialFn")
 	}
-	if conf.Logf == nil {
-		// Nobody cares about RMQConnection's problems...
-		conf.Logf = func(string, ...any) {}
-	}
+	internal.WrapLogFunc(&conf.Log)
+
 	if conf.MinRedialInterval == 0 {
 		conf.MinRedialInterval = time.Second / 8
 	}
@@ -57,14 +57,13 @@ func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnect
 
 	conn := RMQConnection{
 		ctx:               ctx,
-		dialFn:            dialFn,
 		chanReqChan:       make(chan internal.ChanReq[*amqp.Channel]),
 		currentConReqChan: make(chan internal.ChanReq[AMQPConnection]),
 
 		config: conf,
 	}
 
-	go conn.redial()
+	go conn.redial(dialFn)
 
 	return &conn
 }
@@ -94,8 +93,8 @@ func request[T any](connCtx, ctx context.Context, reqChan chan internal.ChanReq[
 
 // RMQConnection is a threadsafe, redialable wrapper around an AMQPConnection.
 type RMQConnection struct {
-	ctx               context.Context
-	dialFn            func() (AMQPConnection, error)
+	ctx context.Context
+
 	chanReqChan       chan internal.ChanReq[*amqp.Channel]
 	currentConReqChan chan internal.ChanReq[AMQPConnection]
 
@@ -122,22 +121,21 @@ func (c *RMQConnection) CurrentConnection(ctx context.Context) (AMQPConnection, 
 	return request(c.ctx, ctx, c.currentConReqChan)
 }
 
-func (c *RMQConnection) redial() {
+func (c *RMQConnection) redial(dialFn func() (AMQPConnection, error)) {
 	var dialDelay time.Duration
 	for {
 		select {
 		case <-c.ctx.Done():
-			c.config.Logf("RMQConnection finishing due to context: %+v", context.Cause(c.ctx))
 			return
 		case <-time.After(dialDelay):
 		}
 
-		amqpConn, err := c.dialFn()
+		amqpConn, err := dialFn()
 		if err != nil {
 			// Configure our backoff according to parameters
 			dialDelay = internal.CalculateDelay(c.config.MinRedialInterval, c.config.MaxRedialInterval, dialDelay)
 
-			c.config.Logf("RMQConnection dialFn failed, retrying after %s. err: %+v", dialDelay.String(), err)
+			c.config.Log(c.ctx, slog.LevelError, "RMQConnection dialFn failed, retrying after %s. err: %+v", dialDelay.String(), err)
 			continue
 		}
 		// After a successful dial, reset our dial delay
@@ -149,19 +147,19 @@ func (c *RMQConnection) redial() {
 
 // listen listens and responds to Channel and Connection requests. It returns on any failure to prompt another redial.
 func (c *RMQConnection) listen(amqpConn AMQPConnection) {
-	logPrefix := fmt.Sprintf("RMQConnection's AMQPConnection (%s)", amqpConn.LocalAddr())
+	logPrefix := fmt.Sprintf("RMQConnection's AMQPConnection (%s -> %s)", amqpConn.LocalAddr(), amqpConn.RemoteAddr())
 	notifyClose := amqpConn.NotifyClose(make(chan *amqp.Error, 1))
 	for {
 		select {
 		case <-c.ctx.Done():
 			// RMQConnection is shutting down, close the connection on our way out
 			if err := amqpConn.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-				c.config.Logf(logPrefix+" failed to close due to err: %+v", err)
+				c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed to close due to err: %+v", err)
 			}
 			return
 		case err := <-notifyClose:
 			if err != nil {
-				c.config.Logf(logPrefix+" received close notification err: %+v", err)
+				c.config.Log(c.ctx, slog.LevelError, logPrefix+" received close notification err: %+v", err)
 			}
 			return
 		case connReq := <-c.currentConReqChan:
@@ -180,7 +178,7 @@ func (c *RMQConnection) listen(amqpConn AMQPConnection) {
 			case <-c.ctx.Done():
 				// RMQConnection is shutting down, close the connection on our way out
 				if err := amqpConn.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
-					c.config.Logf(logPrefix+"  failed to close due to err: %+v", err)
+					c.config.Log(c.ctx, slog.LevelError, logPrefix+"  failed to close due to err: %+v", err)
 				}
 				return
 			case resp := <-respChan:
