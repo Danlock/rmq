@@ -32,16 +32,15 @@ type ConnectConfig struct {
 }
 
 func ConnectWithAMQPConfig(ctx context.Context, conf ConnectConfig, amqpURL string, amqpConf amqp.Config) *RMQConnection {
-	dialFn := func() (AMQPConnection, error) {
+	return Connect(ctx, conf, func() (AMQPConnection, error) {
 		return amqp.DialConfig(amqpURL, amqpConf)
-	}
-	return Connect(ctx, conf, dialFn)
+	})
 }
 
-// Connect returns a resilient, redialable AMQP connection.
-// This connection will redial until it's context is canceled.
-// User's should repeatedly call the Channel() function on any errors from their amqp.Channel.
-// That will trigger RMQConnection to either return a new  amqp.Channel or redial for a new AMQP Connection.
+// Connect returns a resilient, redialable AMQP connection that runs until it's context is canceled.
+// Look at RMQPubilsher and RMQConsumer for practical examples of use,
+// but essentially you grab an amqp.Channel, use it until theres an error, and then grab another amqp.Channel.
+// Each Channel() call triggers RMQConnection to either return an amqp.Channel from it's CurrentConnection() or redial with the provided dialFn for a new AMQP Connection.
 func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnection, error)) *RMQConnection {
 	if dialFn == nil || ctx == nil {
 		panic("Connect requires a ctx and a dialFn")

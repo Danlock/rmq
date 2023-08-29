@@ -1,0 +1,39 @@
+name: danlock/rmq CI
+
+on: [push]
+
+jobs:
+  test:
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.8
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        ports:
+          - 5672
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Dependencies
+        run: make deps
+
+      - name: Unit test
+        run: make unit-test
+
+      - name: Test and generate HTML coverage
+        run: make coverage-html
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: Coverage-${{ matrix.go-version }}
+          path: .coverage.html
