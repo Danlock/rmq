@@ -1,4 +1,4 @@
-name: danlock/rmq CI
+name: danlock/rmq Coverage
 
 on:
   pull_request:
@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
-  test:
+  coverage:
 
     services:
       rabbitmq:
@@ -44,7 +44,7 @@ jobs:
           test-args: '["-tags=rabbit"]'
 
       - name: update coverage badge
-        run: make update-coverage-badge
+        run: make update-readme-badge
 
       - uses: stefanzweifel/git-auto-commit-action@v4
         env:
