@@ -1,14 +1,10 @@
 name: danlock/rmq CI
 
-on:
-  pull_request:
-  push:
-    branches:
-      - main
+on: [push]
 
 jobs:
   test:
-
+    runs-on: ubuntu-latest
     services:
       rabbitmq:
         image: rabbitmq:3.10
@@ -18,12 +14,9 @@ jobs:
         ports:
           - 5672
 
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-        with:
-          # default fetch-depth is insufficent to find previous coverage notes for gwatts/go-coverage-action@v1
-          fetch-depth: 10
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
@@ -35,20 +28,5 @@ jobs:
       - name: Unit test
         run: make unit-test
 
-      - uses: gwatts/go-coverage-action@v1
-        id: coverage
-        env:
-          TEST_AMQP_URI: amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/
-        with:
-          coverage-threshold: 80
-          cover-mode: atomic
-          test-args: '["-v","-race","-count=2","-tags=rabbit"]'
-
-      # - name: Test and generate HTML coverage
-      #   run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/ make coverage-html
-
-      # - name: Upload coverage artifacts
-      #   uses: actions/upload-artifact@v3
-      #   with:
-      #     name: Coverage
-      #     path: .coverage.html
+      - name: Test
+        run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/ make test

@@ -1,4 +1,6 @@
 # rmq
+![Coverage](https://img.shields.io/badge/Coverage-90.1%25-brightgreen)
+
 An AMQP library for Go, built on top of amqp091.
 
 streadway/amqp, the library the RabbitMQ authors forked to amqp091, is a stable, thin client for communicating to RabbitMQ, but lacks many of the features present in RabbitMQ libraries from other languages. Many redialable AMQP connections have been reinvented in Go codebases everywhere.

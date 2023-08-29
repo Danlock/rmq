@@ -1,0 +1,54 @@
+name: danlock/rmq CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.10
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        ports:
+          - 5672
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          # default fetch-depth is insufficent to find previous coverage notes for gwatts/go-coverage-action@v1
+          fetch-depth: 10
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Dependencies
+        run: make deps
+
+      - name: Unit test
+        run: make unit-test
+
+      - uses: gwatts/go-coverage-action@v1
+        id: coverage
+        env:
+          TEST_AMQP_URI: amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/
+        with:
+          coverage-threshold: 80
+          test-args: '["-tags=rabbit"]'
+
+      - name: update coverage badge
+        run: make update-coverage-badge
+
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        env:
+          COVERAGE_PATH: ${{ steps.coverage.outputs.gocov-agg-pathname }}
+        with:
+          file_pattern: 'README.md'
+          commit_message: "Update coverage badge"
