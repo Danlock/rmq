@@ -112,7 +112,7 @@ func (p *RMQPublisher) connect(rmqConn *RMQConnection, returnChan chan amqp.Retu
 func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
 	logPrefix := "RMQPublisher.listen"
 	notifyClose := mqChan.NotifyClose(make(chan *amqp.Error, 2))
-
+	finishedPublishing := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
 	// Handle publishes in a separate goroutine so a slow publish won't lock up listen()
@@ -120,6 +120,7 @@ func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
 		for {
 			select {
 			case <-ctx.Done():
+				close(finishedPublishing)
 				return
 			case pub := <-p.in:
 				pub.publish(mqChan)
@@ -130,6 +131,9 @@ func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
 	for {
 		select {
 		case <-p.ctx.Done():
+			// Wait for publishing to finish since closing the channel in the middle of another channel request
+			// tends to kill the entire connection with a "504 CHANNEL ERROR expected 'channel.open'"
+			<-finishedPublishing
 			if err := mqChan.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
 				p.config.Log(p.ctx, slog.LevelError, logPrefix+" got an error while closing channel %v", err)
 				return

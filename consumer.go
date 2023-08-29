@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/danlock/rmq/internal"
@@ -113,15 +112,6 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 	if err != nil {
 		return nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", err)
 	}
-	defer func() {
-		if err != nil {
-			mqChanErr := mqChan.Close()
-			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				err = errors.Join(err, mqChanErr)
-			}
-		}
-	}()
-
 	// Network calls that don't take a context are dangerous, and can block indefintely.
 	// Call them in a goroutine so we can timeout if necessary
 
@@ -134,8 +124,13 @@ func (c *RMQConsumer) Declare(ctx context.Context, rmqConn *RMQConnection) (_ *a
 	go func() {
 		var err error
 		var queue amqp.Queue
-
 		defer func() {
+			if err != nil {
+				mqChanErr := mqChan.Close()
+				if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
+					err = errors.Join(err, mqChanErr)
+				}
+			}
 			respChan <- resp{queue, err}
 		}()
 
@@ -245,15 +240,6 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 		ctx, cancel = context.WithTimeout(ctx, c.config.AMQPTimeout)
 		defer cancel()
 	}
-
-	defer func() {
-		if err != nil {
-			mqChanErr := mqChan.Close()
-			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
-				err = errors.Join(err, mqChanErr)
-			}
-		}
-	}()
 	// TODO: https://github.com/rabbitmq/amqp091-go/pull/192 has merged a Channel.ConsumeWithContext, which may just cause this entire function to be deleted in the future.
 	type resp struct {
 		deliveries <-chan amqp.Delivery
@@ -272,6 +258,12 @@ func (c *RMQConsumer) Consume(ctx context.Context, mqChan *amqp.Channel) (_ <-ch
 			c.config.Consume.NoWait,
 			c.config.Consume.Args,
 		)
+		if r.err != nil {
+			mqChanErr := mqChan.Close()
+			if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
+				r.err = errors.Join(r.err, mqChanErr)
+			}
+		}
 		respChan <- r
 	}()
 
@@ -330,11 +322,10 @@ func (c *RMQConsumer) Process(ctx context.Context, rmqConn *RMQConnection, deliv
 func (c *RMQConsumer) processDeliveries(ctx context.Context, mqChan *amqp.Channel, msgChan <-chan amqp.Delivery, processor func(ctx context.Context, msg amqp.Delivery)) {
 	logPrefix := fmt.Sprintf("RMQConsumer.processDeliveries for queue %s", c.config.Queue.Name)
 	closeNotifier := mqChan.NotifyClose(make(chan *amqp.Error, 2))
-	var consGroup sync.WaitGroup
+
 	for {
 		select {
 		case <-ctx.Done():
-			consGroup.Wait()
 			if err := mqChan.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
 				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to Close it's AMQP channel due to %v", err)
 				// Typically we exit processDeliveries by waiting for the msgChan to close, but if we can't close the mqChan then abandon ship
@@ -348,8 +339,7 @@ func (c *RMQConsumer) processDeliveries(ctx context.Context, mqChan *amqp.Channe
 			if !ok {
 				return
 			}
-			consGroup.Add(1)
-			go func() { processor(ctx, msg); consGroup.Done() }()
+			go processor(ctx, msg)
 		}
 	}
 }

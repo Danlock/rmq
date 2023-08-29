@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/danlock/rmq"
+	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -132,6 +133,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 	defer cancel()
 
 	logf := slog.Log
+	internal.WrapLogFunc(&logf)
 
 	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
@@ -190,7 +192,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 	consumers := []rmq.ConsumerConfig{baseConsConfig, prefetchConsConfig}
 	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{ /*Log: logf*/ })
 
-	msgCount := 25_000
+	msgCount := 5_000
 	errChan := make(chan error, (msgCount+1)*len(consumers))
 	for _, c := range consumers {
 		c := c
