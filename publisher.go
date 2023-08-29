@@ -160,18 +160,6 @@ type Publishing struct {
 	req internal.ChanReq[*amqp.DeferredConfirmation]
 }
 
-const pkgHeader = "github.com/danlock/rmq.RMQPublisher.PublishUntilAcked"
-
-// makeID sets a field within the Publishing.Header so PublishUntilAcked can identify returned Publishing's.
-func (p *Publishing) makeID() string {
-	if p.Headers == nil {
-		p.Headers = make(amqp.Table, 1)
-	}
-	id := fmt.Sprintf("%s|%p", time.Now().Format(time.RFC3339Nano), p)
-	p.Headers[pkgHeader] = id
-	return id
-}
-
 func (p *Publishing) publish(mqChan *amqp.Channel) {
 	var resp internal.ChanResp[*amqp.DeferredConfirmation]
 	resp.Val, resp.Err = mqChan.PublishWithDeferredConfirmWithContext(
