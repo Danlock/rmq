@@ -30,7 +30,7 @@ jobs:
         run: make unit-test
 
       - name: Test and generate HTML coverage
-        run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:5672/ make coverage-html
+        run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/ make coverage-html
 
       - name: Upload coverage artifacts
         uses: actions/upload-artifact@v3
