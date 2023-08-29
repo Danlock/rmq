@@ -41,7 +41,7 @@ jobs:
           TEST_AMQP_URI: amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/
         with:
           coverage-threshold: 80
-          test-args:'["-v","-race","-count=2","-tags=rabbit"]'
+          test-args: '["-v","-race","-count=2","-tags=rabbit"]'
 
       # - name: Test and generate HTML coverage
       #   run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/ make coverage-html
