@@ -16,6 +16,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+        with:
+          # default fetch-depth is insufficent to find previous coverage notes for gwatts/go-coverage-action@v1
+          fetch-depth: 10
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -30,3 +33,21 @@ jobs:
 
       - name: Test
         run: TEST_AMQP_URI=amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/ make test
+
+      - uses: gwatts/go-coverage-action@v1
+        id: coverage
+        env:
+          TEST_AMQP_URI: amqp://guest:guest@127.0.0.1:${{ job.services.rabbitmq.ports['5672'] }}/
+        with:
+          coverage-threshold: 80
+          test-args: '["-tags=rabbit"]'
+
+      - name: update coverage badge
+        env:
+          COVERAGE_PATH: ${{ steps.coverage.outputs.gocov-agg-pathname }}
+        run: make update-readme-badge
+
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          file_pattern: 'README.md'
+          commit_message: "Update coverage badge"
