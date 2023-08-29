@@ -1,5 +1,5 @@
 # rmq
-![Coverage](https://img.shields.io/badge/Coverage-90.1%25-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-90.5%25-brightgreen)
 
 An AMQP library for Go, built on top of amqp091.
 
