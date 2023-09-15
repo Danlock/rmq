@@ -12,7 +12,7 @@ import (
 )
 
 type PublisherConfig struct {
-	// NotifyReturn will recieve amqp.Return's from any amqp.Channel this RMQPublisher sends on.
+	// NotifyReturn will receive amqp.Return's from any amqp.Channel this rmq.Publisher sends on.
 	// Recommended to use a buffered channel.
 	NotifyReturn chan<- amqp.Return
 
@@ -22,19 +22,19 @@ type PublisherConfig struct {
 	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
 	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 
-	// *RetryInterval controls how frequently RMQPublisher retries on errors. Defaults from 0.125 seconds to 32 seconds.
+	// *RetryInterval controls how frequently rmq.Publisher retries on errors. Defaults from 0.125 seconds to 32 seconds.
 	MinRetryInterval, MaxRetryInterval time.Duration
 }
 
-type RMQPublisher struct {
+type Publisher struct {
 	ctx    context.Context
 	config PublisherConfig
 	in     chan *Publishing
 }
 
-// NewPublisher creates a RMQPublisher that will publish messages to AMQP on a single amqp.Channel at a time.
-// On any error such as Channel or Connection closes, it will get a new Channel, which redials AMQP if necessary.
-func NewPublisher(ctx context.Context, rmqConn *RMQConnection, config PublisherConfig) *RMQPublisher {
+// NewPublisher creates a rmq.Publisher that will publish messages to AMQP on a single amqp.Channel at a time.
+// On error it reconnects via rmq.Connection. Shuts down when it's context is finished.
+func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherConfig) *Publisher {
 	if ctx == nil || rmqConn == nil {
 		panic("rmq.NewPublisher called with nil ctx or rmqConn")
 	}
@@ -47,21 +47,19 @@ func NewPublisher(ctx context.Context, rmqConn *RMQConnection, config PublisherC
 		config.MaxRetryInterval = 32 * time.Second
 	}
 
-	pub := &RMQPublisher{
+	pub := &Publisher{
 		ctx:    ctx,
 		config: config,
 		in:     make(chan *Publishing),
 	}
 
-	returnChan := make(chan amqp.Return)
-
-	go pub.connect(rmqConn, returnChan)
+	go pub.connect(rmqConn)
 	return pub
 }
 
-// connect grabs an amqp.Channel from RMQConnection. It does so repeatedly on any error until it's context finishes.
-func (p *RMQPublisher) connect(rmqConn *RMQConnection, returnChan chan amqp.Return) {
-	logPrefix := "RMQPublisher.connect"
+// connect grabs an amqp.Channel from rmq.Connection. It does so repeatedly on any error until it's context finishes.
+func (p *Publisher) connect(rmqConn *Connection) {
+	logPrefix := "rmq.Publisher.connect"
 	var delay time.Duration
 
 	for {
@@ -99,6 +97,7 @@ func (p *RMQPublisher) connect(rmqConn *RMQConnection, returnChan chan amqp.Retu
 					select {
 					case p.config.NotifyReturn <- r:
 					default:
+						p.config.Log(p.ctx, slog.LevelWarn, logPrefix+" NotifyReturn lacking listeners, dropping amqp.Return %+v", r)
 					}
 				}
 			}()
@@ -109,8 +108,8 @@ func (p *RMQPublisher) connect(rmqConn *RMQConnection, returnChan chan amqp.Retu
 }
 
 // listen sends publishes on a amqp.Channel until it's closed.
-func (p *RMQPublisher) listen(mqChan *amqp.Channel) {
-	logPrefix := "RMQPublisher.listen"
+func (p *Publisher) listen(mqChan *amqp.Channel) {
+	logPrefix := "rmq.Publisher.listen"
 	notifyClose := mqChan.NotifyClose(make(chan *amqp.Error, 2))
 	finishedPublishing := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(p.ctx)
@@ -167,26 +166,26 @@ func (p *Publishing) publish(mqChan *amqp.Channel) {
 	p.req.RespChan <- resp
 }
 
-// Publish send a Publishing on RMQPublisher's current amqp.Channel.
-// Returns amqp.DefferedConfirmation's only if the RMQPublisher has Confirm set.
-// If an error is returned, RMQPublisher will grab another amqp.Channel from RMQConnection, which itself will redial AMQP if necessary.
+// Publish send a Publishing on rmq.Publisher's current amqp.Channel.
+// Returns amqp.DefferedConfirmation's only if the rmq.Publisher has Confirm set.
+// If an error is returned, rmq.Publisher will grab another amqp.Channel from rmq.Connection, which itself will redial AMQP if necessary.
 // This means simply retrying Publish on errors will send Publishing's even on flaky connections.
-func (p *RMQPublisher) Publish(ctx context.Context, pub Publishing) (*amqp.DeferredConfirmation, error) {
+func (p *Publisher) Publish(ctx context.Context, pub Publishing) (*amqp.DeferredConfirmation, error) {
 	pub.req.Ctx = ctx
 	pub.req.RespChan = make(chan internal.ChanResp[*amqp.DeferredConfirmation], 1)
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("RMQPublisher.Publish context done before publish sent %w", context.Cause(ctx))
+		return nil, fmt.Errorf("rmq.Publisher.Publish context done before publish sent %w", context.Cause(ctx))
 	case <-p.ctx.Done():
-		return nil, fmt.Errorf("RMQPublisher context done before publish sent %w", context.Cause(p.ctx))
+		return nil, fmt.Errorf("rmq.Publisher context done before publish sent %w", context.Cause(p.ctx))
 	case p.in <- &pub:
 	}
 
 	select {
 	case <-ctx.Done():
-		return nil, fmt.Errorf("RMQPublisher.Publish context done before publish completed %w", context.Cause(ctx))
+		return nil, fmt.Errorf("rmq.Publisher.Publish context done before publish completed %w", context.Cause(ctx))
 	case <-p.ctx.Done():
-		return nil, fmt.Errorf("RMQPublisher context done before publish completed %w", context.Cause(p.ctx))
+		return nil, fmt.Errorf("rmq.Publisher context done before publish completed %w", context.Cause(p.ctx))
 	case r := <-pub.req.RespChan:
 		return r.Val, r.Err
 	}
@@ -196,11 +195,11 @@ func (p *RMQPublisher) Publish(ctx context.Context, pub Publishing) (*amqp.Defer
 // It republishes if a message isn't confirmed after ConfirmTimeout, or if Publish returns an error.
 // Returns *amqp.DeferredConfirmation so the caller can check if it's Acked().
 // Recommended to call with context.WithTimeout.
-func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, pub Publishing) (*amqp.DeferredConfirmation, error) {
-	logPrefix := "RMQPublisher.PublishUntilConfirmed"
+func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, pub Publishing) (*amqp.DeferredConfirmation, error) {
+	logPrefix := "rmq.Publisher.PublishUntilConfirmed"
 
 	if p.config.DontConfirm {
-		return nil, fmt.Errorf(logPrefix + " called on a RMQPublisher that's not in Confirm mode")
+		return nil, fmt.Errorf(logPrefix + " called on a rmq.Publisher that's not in Confirm mode")
 	}
 
 	if confirmTimeout <= 0 {
@@ -231,7 +230,7 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 			p.config.Log(ctx, slog.LevelWarn, logPrefix+" timed out waiting for confirm, republishing")
 			continue
 		case <-ctx.Done():
-			return defConf, fmt.Errorf("RMQPublisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
+			return defConf, fmt.Errorf("rmq.Publisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
 		case <-defConf.Done():
 			return defConf, nil
 		}
@@ -247,8 +246,8 @@ func (p *RMQPublisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout
 //
 // PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or temporary RabbitMQ node failures.
 // Recommended to call with context.WithTimeout.
-func (p *RMQPublisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.Duration, pub Publishing) error {
-	logPrefix := "RMQPublisher.PublishUntilAcked"
+func (p *Publisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.Duration, pub Publishing) error {
+	logPrefix := "rmq.Publisher.PublishUntilAcked"
 	nacks := 0
 	for {
 		defConf, err := p.PublishUntilConfirmed(ctx, confirmTimeout, pub)

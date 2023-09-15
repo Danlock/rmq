@@ -20,7 +20,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func TestRMQConsumer(t *testing.T) {
+func TestConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -33,12 +33,25 @@ func TestRMQConsumer(t *testing.T) {
 			Name:    "amq.topic",
 			Kind:    amqp.ExchangeTopic,
 			Durable: true,
+		}, {
+			Name:    "someotherxchg",
+			Kind:    amqp.ExchangeTopic,
+			Durable: true,
+		}, {
+			Name:    "djkhaled",
+			Kind:    amqp.ExchangeTopic,
+			Durable: true,
+		}},
+		ExchangeBindings: []rmq.ConsumerExchangeBinding{{
+			Destination: "someotherxchg",
+			RoutingKey:  "thisisunused",
+			Source:      "djkhaled",
 		}},
 		Queue: rmq.ConsumerQueue{
 			Name: "TestRMQConsumer " + time.Now().Format(time.RFC3339Nano),
 			Args: amqp.Table{"x-expires": time.Minute.Milliseconds()},
 		},
-		Bindings: []rmq.ConsumerBinding{
+		QueueBindings: []rmq.ConsumerQueueBinding{
 			{ExchangeName: "amq.topic", RoutingKey: "TestRMQConsumer"},
 		},
 		Consume: rmq.ConsumerConsume{
@@ -69,13 +82,9 @@ func TestRMQConsumer(t *testing.T) {
 	if err == nil {
 		t.Fatalf("Declare succeeded with a canceled context")
 	}
-	_, err = passiveCons.Consume(canceledCtx, mqChan)
-	if err == nil {
-		t.Fatalf("Consume succeeded with a canceled context")
-	}
 
 	rmqBaseConsMessages := make(chan amqp.Delivery, 10)
-	go baseConsumer.Process(ctx, rmqConn, func(ctx context.Context, msg amqp.Delivery) {
+	go baseConsumer.ConsumeConcurrently(ctx, rmqConn, 0, func(ctx context.Context, msg amqp.Delivery) {
 		rmqBaseConsMessages <- msg
 		_ = msg.Ack(false)
 	})
@@ -90,12 +99,12 @@ func TestRMQConsumer(t *testing.T) {
 			t.Fatalf("failed to get rmqConn's current connection %v", err)
 		}
 		// close the current connection to force a redial
-		_ = amqpConn.Close()
+		amqpConn.CloseDeadline(time.Now().Add(time.Minute))
 	}
 	forceRedial()
 	pubCtx, pubCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pubCancel()
-	wantedPub := rmq.Publishing{Exchange: baseConsConfig.Bindings[0].ExchangeName, RoutingKey: baseConsConfig.Bindings[0].RoutingKey}
+	wantedPub := rmq.Publishing{Exchange: baseConsConfig.QueueBindings[0].ExchangeName, RoutingKey: baseConsConfig.QueueBindings[0].RoutingKey}
 	wantedPub.Body = []byte("TestRMQPublisher")
 
 	pubCount := 10
@@ -128,7 +137,7 @@ func TestRMQConsumer(t *testing.T) {
 	}
 }
 
-func TestRMQConsumer_Load(t *testing.T) {
+func TestConsumer_Load(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute/2)
 	defer cancel()
 
@@ -144,7 +153,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 				return
 			case <-time.After(time.Second):
 				amqpConn, _ := rmqConn.CurrentConnection(ctx)
-				amqpConn.Close()
+				amqpConn.CloseDeadline(time.Now().Add(time.Minute))
 			}
 		}
 	}
@@ -161,7 +170,7 @@ func TestRMQConsumer_Load(t *testing.T) {
 			Name: baseName,
 			Args: amqp.Table{amqp.QueueTTLArg: time.Minute.Milliseconds()},
 		},
-		Bindings: []rmq.ConsumerBinding{
+		QueueBindings: []rmq.ConsumerQueueBinding{
 			{ExchangeName: "amq.topic", RoutingKey: baseName},
 		},
 		Consume: rmq.ConsumerConsume{
@@ -180,8 +189,8 @@ func TestRMQConsumer_Load(t *testing.T) {
 	prefetchConsConfig := baseConsConfig
 	prefetchConsConfig.Qos.PrefetchCount = 10
 	prefetchConsConfig.Queue.Name = prefetchName
-	prefetchConsConfig.Bindings = []rmq.ConsumerBinding{baseConsConfig.Bindings[0]}
-	prefetchConsConfig.Bindings[0].RoutingKey = prefetchName
+	prefetchConsConfig.QueueBindings = []rmq.ConsumerQueueBinding{baseConsConfig.QueueBindings[0]}
+	prefetchConsConfig.QueueBindings[0].RoutingKey = prefetchName
 
 	mqChan, err = rmq.NewConsumer(prefetchConsConfig).Declare(ctx, rmqConn)
 	if err != nil {
@@ -201,16 +210,16 @@ func TestRMQConsumer_Load(t *testing.T) {
 			receives := make(map[int]struct{})
 			var msgRecv uint64
 			var consMu sync.Mutex
-			rmq.NewConsumer(c).Process(ctx, rmqConn, func(ctx context.Context, msg amqp.Delivery) {
+			rmq.NewConsumer(c).ConsumeConcurrently(ctx, rmqConn, 0, func(ctx context.Context, msg amqp.Delivery) {
 				if !c.Consume.AutoAck {
 					defer msg.Ack(false)
 				}
-				indexBytes := bytes.TrimPrefix(msg.Body, []byte(c.Queue.Name+":"))
+				indexBytes := bytes.TrimPrefix(msg.Body, []byte(c.QueueBindings[0].RoutingKey+":"))
 				index, err := strconv.Atoi(string(indexBytes))
 				consMu.Lock()
 				defer consMu.Unlock()
 				if err != nil {
-					logf(ctx, slog.LevelError, "%s got %d msgs", c.Queue.Name, msgRecv)
+					logf(ctx, slog.LevelError, "%s got %d msgs. Last msg %s", c.Queue.Name, msgRecv, string(msg.Body))
 					errChan <- err
 					cancel()
 				} else {
@@ -230,22 +239,22 @@ func TestRMQConsumer_Load(t *testing.T) {
 			for i := 0; i < msgCount/2; i++ {
 				go func(i int) {
 					errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
-						Exchange:   c.Bindings[0].ExchangeName,
-						RoutingKey: c.Bindings[0].RoutingKey,
+						Exchange:   c.QueueBindings[0].ExchangeName,
+						RoutingKey: c.QueueBindings[0].RoutingKey,
 						Mandatory:  true,
 						Publishing: amqp.Publishing{
-							Body: []byte(fmt.Sprint(c.Queue.Name, ":", i)),
+							Body: []byte(fmt.Sprint(c.QueueBindings[0].RoutingKey, ":", i)),
 						},
 					})
 				}(i)
 			}
 			for i := msgCount / 2; i < msgCount; i++ {
 				errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
-					Exchange:   c.Bindings[0].ExchangeName,
-					RoutingKey: c.Bindings[0].RoutingKey,
+					Exchange:   c.QueueBindings[0].ExchangeName,
+					RoutingKey: c.QueueBindings[0].RoutingKey,
 					Mandatory:  true,
 					Publishing: amqp.Publishing{
-						Body: []byte(fmt.Sprint(c.Queue.Name, ":", i)),
+						Body: []byte(fmt.Sprint(c.QueueBindings[0].RoutingKey, ":", i)),
 					},
 				})
 			}
@@ -262,4 +271,36 @@ func TestRMQConsumer_Load(t *testing.T) {
 			}
 		}
 	}
+}
+
+// RabbitMQ behaviour around auto generated names and restricting declaring queues with amq prefix
+func TestRMQConsumer_AutogeneratedQueueNames(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute/2)
+	defer cancel()
+
+	logf := slog.Log
+	internal.WrapLogFunc(&logf)
+
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+
+	// NewConsumer with an empty config will only declare a queue with an anonymous, RabbitMQ generated name
+	cons := rmq.NewConsumer(rmq.ConsumerConfig{})
+	mqChan, err := cons.Declare(ctx, rmqConn)
+	if err != nil {
+		t.Fatalf("failed to declare %v", err)
+	}
+	_ = mqChan.Close()
+
+	amqpConn, err := rmqConn.CurrentConnection(ctx)
+	if err != nil {
+		t.Fatalf("failed getting current connection %v", err)
+	}
+	amqpConn.CloseDeadline(time.Now().Add(time.Minute))
+
+	// Declaring this twice should work without errors
+	mqChan, err = cons.Declare(ctx, rmqConn)
+	if err != nil {
+		t.Fatalf("failed to declare %v", err)
+	}
+	_ = mqChan.Close()
 }

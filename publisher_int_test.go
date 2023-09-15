@@ -14,7 +14,7 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func TestRMQPublisher(t *testing.T) {
+func TestPublisher(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -39,14 +39,14 @@ func TestRMQPublisher(t *testing.T) {
 			t.Fatalf("failed to get rmqConn's current connection %v", err)
 		}
 		// close the current connection to force a redial
-		_ = amqpConn.Close()
+		amqpConn.CloseDeadline(time.Now().Add(time.Minute))
 	}
 	forceRedial()
 	pubCtx, pubCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pubCancel()
 
 	wantedPub := rmq.Publishing{Exchange: "amq.topic"}
-	wantedPub.Body = []byte("TestRMQPublisher")
+	wantedPub.Body = []byte("Testrmq.Publisher")
 	_, err = rmqPub.PublishUntilConfirmed(pubCtx, time.Minute, wantedPub)
 	if err != nil {
 		t.Fatalf("PublishUntilConfirmed failed with %v", err)

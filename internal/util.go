@@ -30,13 +30,13 @@ func CalculateDelay(min, max, current time.Duration) time.Duration {
 	}
 }
 
-// WrapLogFunc runs fmt.Sprintf on the msg, args parameters so the end user can use slog.Log or any other logging library more interchangably.
+// WrapLogFunc runs fmt.Sprintf on the msg, args parameters so the end user can use slog.Log or any other logging library more interchangeably.
 // The slog.Log func signature is convenient for providing an easily wrappable log func, and is better than the usual func(string, any...).
 // The end user can take advantage of context for log tracing, slog.Level to ignore warnings, and we only depend on the stdlib.
 // This does mean calldepth loggers will need a +1 however.
 func WrapLogFunc(logFunc *func(ctx context.Context, level slog.Level, msg string, args ...any)) {
 	if logFunc == nil {
-		panic("WrapLogFunc takes a pointer")
+		panic("WrapLogFunc called with nil")
 	} else if *logFunc == nil {
 		*logFunc = func(ctx context.Context, level slog.Level, msg string, args ...any) {}
 	} else {

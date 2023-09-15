@@ -35,8 +35,11 @@ func (m *MockAMQPConnection) LocalAddr() net.Addr {
 func (m *MockAMQPConnection) RemoteAddr() net.Addr {
 	return &net.UnixAddr{"MockAMQPConnection", "unix"}
 }
-func (m *MockAMQPConnection) Close() error {
-	return fmt.Errorf("MockAMQPConnection.Close error that should just be logged")
+func (m *MockAMQPConnection) CloseDeadline(time.Time) error {
+	return nil
+}
+func (m *MockAMQPConnection) IsClosed() bool {
+	return false
 }
 
 func TestConnect(t *testing.T) {
@@ -53,11 +56,11 @@ func TestConnect(t *testing.T) {
 	}
 	rmqConn := Connect(context.Background(), ConnectConfig{}, func() (AMQPConnection, error) { return nil, fmt.Errorf("sike") })
 	if rmqConn == nil {
-		t.Fatalf("Connect failed to return a RMQConnection")
+		t.Fatalf("Connect failed to return a rmq.Connection")
 	}
 }
 
-func TestRMQConnection_CurrentConnection(t *testing.T) {
+func TestConnection_CurrentConnection(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
@@ -90,16 +93,16 @@ func TestRMQConnection_CurrentConnection(t *testing.T) {
 			rmqConn := Connect(tt.connCtx, ConnectConfig{}, tt.connDialFn)
 			got, err := rmqConn.CurrentConnection(tt.reqCtx)
 			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("RMQConnection.CurrentConnection() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf("rmq.Connection.CurrentConnection() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if err == nil && got == nil {
-				t.Errorf("RMQConnection.CurrentConnection() should have returned an AMQPConnection")
+				t.Errorf("rmq.Connection.CurrentConnection() should have returned an AMQPConnection")
 			}
 		})
 	}
 }
 
-func TestRMQConnection_Channel(t *testing.T) {
+func TestConnection_Channel(t *testing.T) {
 	closeChan := make(chan *amqp.Error, 5)
 	badErr := fmt.Errorf("shucks")
 	// close the connection, redialer should grab a new one in time
@@ -139,7 +142,7 @@ func TestRMQConnection_Channel(t *testing.T) {
 	tests := []struct {
 		name    string
 		ctx     context.Context
-		rmqConn *RMQConnection
+		rmqConn *Connection
 		wantErr error
 	}{
 		{
@@ -170,7 +173,7 @@ func TestRMQConnection_Channel(t *testing.T) {
 			defer cancel()
 			_, err := tt.rmqConn.Channel(ctx)
 			if !errors.Is(err, tt.wantErr) {
-				t.Errorf("RMQConnection.Channel() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("rmq.Connection.Channel() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 		})
@@ -196,11 +199,11 @@ func TestRMQConnection_Channel(t *testing.T) {
 
 	_, err := flakyRMQConn.Channel(ctx)
 	if !errors.Is(err, badErr) {
-		t.Fatalf("RMQConnection.Channel() error = %v, wantErr %v", err, badErr)
+		t.Fatalf("rmq.Connection.Channel() error = %v, wantErr %v", err, badErr)
 	}
 	_, err = flakyRMQConn.Channel(ctx)
 	if err != nil {
-		t.Fatalf("RMQConnection.Channel() error = %v", err)
+		t.Fatalf("rmq.Connection.Channel() error = %v", err)
 	}
 
 	midChanCtx, midChanCancel := context.WithCancel(context.Background())
@@ -215,6 +218,6 @@ func TestRMQConnection_Channel(t *testing.T) {
 		return midChanMockAMQP, nil
 	})
 	if _, err = midChanRMQ.Channel(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("RMQConnection.Channel() error = %v, wantErr %v", err, context.Canceled)
+		t.Fatalf("rmq.Connection.Channel() error = %v, wantErr %v", err, context.Canceled)
 	}
 }
