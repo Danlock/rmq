@@ -1,6 +1,7 @@
 # rmq
 ![Coverage](https://img.shields.io/badge/Coverage-87.0%25-brightgreen)
 [![Go Report Card](https://goreportcard.com/badge/github.com/danlock/rmq)](https://goreportcard.com/report/github.com/danlock/rmq)
+[![Go Reference](https://pkg.go.dev/badge/github.com/danlock/rmq.svg)](https://pkg.go.dev/github.com/danlock/rmq)
 
 An AMQP library for Go, built on top of amqp091.
 
