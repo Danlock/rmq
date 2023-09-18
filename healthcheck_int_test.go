@@ -1,3 +1,5 @@
+//go:build rabbit
+
 package rmq_test
 
 import (

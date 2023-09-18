@@ -57,7 +57,7 @@ rmq.NewConsumer(consCfg).ConsumeConcurrently(ctx, rmqConn, 50, func(ctx context.
 })
 ```
 
-Take a look at healthcheck_test.go for a more complete example.
+Take a look at healthcheck_int_test.go for a more complete example.
 
 # Logging
 
