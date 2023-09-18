@@ -23,75 +23,40 @@ import (
 func TestConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	logf := slog.Log
-
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	rmqConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("TEST_AMQP_URI"))
 
 	baseConsConfig := rmq.ConsumerConfig{
-		Exchanges: []rmq.ConsumerExchange{{
-			Name:    "amq.topic",
-			Kind:    amqp.ExchangeTopic,
-			Durable: true,
-		}, {
-			Name:    "someotherxchg",
-			Kind:    amqp.ExchangeTopic,
-			Durable: true,
-		}, {
-			Name:    "djkhaled",
-			Kind:    amqp.ExchangeTopic,
-			Durable: true,
-		}},
-		ExchangeBindings: []rmq.ConsumerExchangeBinding{{
-			Destination: "someotherxchg",
-			RoutingKey:  "thisisunused",
-			Source:      "djkhaled",
-		}},
-		Queue: rmq.ConsumerQueue{
-			Name: "TestRMQConsumer " + time.Now().Format(time.RFC3339Nano),
-			Args: amqp.Table{"x-expires": time.Minute.Milliseconds()},
+		Queue: rmq.Queue{
+			Name: fmt.Sprintf("TestRMQConsumer.%p", t),
+			Args: amqp.Table{amqp.QueueTTLArg: time.Minute.Milliseconds()},
 		},
-		QueueBindings: []rmq.ConsumerQueueBinding{
-			{ExchangeName: "amq.topic", RoutingKey: "TestRMQConsumer"},
+		Consume: rmq.Consume{
+			Consumer: "TestConsumer",
 		},
-		Consume: rmq.ConsumerConsume{
-			Consumer: "TestRMQConsumerBase",
+		Qos: rmq.Qos{
+			PrefetchCount: 2000,
 		},
-		Log: logf,
-	}
-	baseConsumer := rmq.NewConsumer(baseConsConfig)
-	mqChan, err := baseConsumer.Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf("failed initial consumer setup")
-	}
-	defer mqChan.Close()
 
-	passiveConsConfig := rmq.ConsumerConfig{Exchanges: []rmq.ConsumerExchange{baseConsConfig.Exchanges[0]}, Queue: baseConsConfig.Queue}
-	passiveConsConfig.Exchanges[0].Passive = true
-	passiveConsConfig.Queue.Passive = true
-	passiveCons := rmq.NewConsumer(passiveConsConfig)
-	passiveMQChan, err := passiveCons.Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf("failed initial passive consumer setup")
+		Log:              slog.Log,
+		MinRetryInterval: time.Second / 64,
 	}
-	defer passiveMQChan.Close()
+
+	baseConsumer := rmq.NewConsumer(baseConsConfig)
 
 	canceledCtx, canceledCancel := context.WithCancel(ctx)
 	canceledCancel()
-	_, err = passiveCons.Declare(canceledCtx, rmqConn)
-	if err == nil {
-		t.Fatalf("Declare succeeded with a canceled context")
-	}
+	// ConsumeConcurrently should exit immediately on canceled contexts.
+	baseConsumer.ConsumeConcurrently(canceledCtx, rmqConn, 0, nil)
 
 	rmqBaseConsMessages := make(chan amqp.Delivery, 10)
 	go baseConsumer.ConsumeConcurrently(ctx, rmqConn, 0, func(ctx context.Context, msg amqp.Delivery) {
 		rmqBaseConsMessages <- msg
 		_ = msg.Ack(false)
 	})
-
-	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true, Log: logf})
+	time.Sleep(time.Second / 10)
+	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
 	unreliableRMQPub.Publish(ctx, rmq.Publishing{Exchange: "amq.fanout"})
-	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: logf})
+	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: slog.Log})
 
 	forceRedial := func() {
 		amqpConn, err := rmqConn.CurrentConnection(ctx)
@@ -104,7 +69,8 @@ func TestConsumer(t *testing.T) {
 	forceRedial()
 	pubCtx, pubCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pubCancel()
-	wantedPub := rmq.Publishing{Exchange: baseConsConfig.QueueBindings[0].ExchangeName, RoutingKey: baseConsConfig.QueueBindings[0].RoutingKey}
+
+	wantedPub := rmq.Publishing{RoutingKey: baseConsConfig.Queue.Name}
 	wantedPub.Body = []byte("TestRMQPublisher")
 
 	pubCount := 10
@@ -118,12 +84,13 @@ func TestConsumer(t *testing.T) {
 
 	for i := 0; i < pubCount; i++ {
 		if err := <-errChan; err != nil {
-			t.Fatalf("PublishUntilConfirmed returned unexpected error %v", err)
+			t.Fatalf("PublishUntilAcked returned unexpected error %v", err)
 		}
 		if i%2 == 0 {
 			forceRedial()
 		}
 	}
+
 	for i := 0; i < pubCount; i++ {
 		var msg amqp.Delivery
 		select {
@@ -131,6 +98,7 @@ func TestConsumer(t *testing.T) {
 			t.Fatalf("timed out waiting for published message %d", i)
 		case msg = <-rmqBaseConsMessages:
 		}
+
 		if !reflect.DeepEqual(msg.Body, wantedPub.Body) {
 			t.Fatalf("Received unexpected message %s", string(msg.Body))
 		}
@@ -141,10 +109,22 @@ func TestConsumer_Load(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute/2)
 	defer cancel()
 
-	logf := slog.Log
+	logf := internal.SlogLog(nil)
 	internal.WrapLogFunc(&logf)
+	baseName := fmt.Sprint("TestRMQConsumer_Load_Base_", rand.Uint64())
+	prefetchName := fmt.Sprint("TestRMQConsumer_Load_Prefetch_", rand.Uint64())
 
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	topology := rmq.Topology{
+		Queues: []rmq.Queue{{
+			Name: baseName,
+			Args: amqp.Table{amqp.QueueTTLArg: time.Minute.Milliseconds()},
+		}, {
+			Name: prefetchName,
+			Args: amqp.Table{amqp.QueueTTLArg: time.Minute.Milliseconds()},
+		}},
+	}
+
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf, Topology: topology}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	periodicallyCloseConn := func() {
 		for {
@@ -159,47 +139,21 @@ func TestConsumer_Load(t *testing.T) {
 	}
 	go periodicallyCloseConn()
 
-	baseName := fmt.Sprint("TestRMQConsumer_Load_Base_", rand.Uint64())
 	baseConsConfig := rmq.ConsumerConfig{
-		Exchanges: []rmq.ConsumerExchange{{
-			Name:    "amq.topic",
-			Kind:    amqp.ExchangeTopic,
-			Durable: true,
-		}},
-		Queue: rmq.ConsumerQueue{
-			Name: baseName,
-			Args: amqp.Table{amqp.QueueTTLArg: time.Minute.Milliseconds()},
-		},
-		QueueBindings: []rmq.ConsumerQueueBinding{
-			{ExchangeName: "amq.topic", RoutingKey: baseName},
-		},
-		Consume: rmq.ConsumerConsume{
+		Queue: topology.Queues[0],
+		Consume: rmq.Consume{
 			Consumer: baseName,
 		},
 		Log: logf,
 	}
-	// Here we Declare our Consumer's before Process is called in another goroutine, to ensure published messages will be placed on a queue.
-	mqChan, err := rmq.NewConsumer(baseConsConfig).Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf(err.Error())
-	}
-	mqChan.Close()
 
-	prefetchName := fmt.Sprint("TestRMQConsumer_Load_Prefetch_", rand.Uint64())
 	prefetchConsConfig := baseConsConfig
+	prefetchConsConfig.Queue = topology.Queues[1]
 	prefetchConsConfig.Qos.PrefetchCount = 10
 	prefetchConsConfig.Queue.Name = prefetchName
-	prefetchConsConfig.QueueBindings = []rmq.ConsumerQueueBinding{baseConsConfig.QueueBindings[0]}
-	prefetchConsConfig.QueueBindings[0].RoutingKey = prefetchName
-
-	mqChan, err = rmq.NewConsumer(prefetchConsConfig).Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf(err.Error())
-	}
-	mqChan.Close()
 
 	consumers := []rmq.ConsumerConfig{baseConsConfig, prefetchConsConfig}
-	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{ /*Log: logf*/ })
+	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: logf})
 
 	msgCount := 5_000
 	errChan := make(chan error, (msgCount+1)*len(consumers))
@@ -214,7 +168,7 @@ func TestConsumer_Load(t *testing.T) {
 				if !c.Consume.AutoAck {
 					defer msg.Ack(false)
 				}
-				indexBytes := bytes.TrimPrefix(msg.Body, []byte(c.QueueBindings[0].RoutingKey+":"))
+				indexBytes := bytes.TrimPrefix(msg.Body, []byte(c.Queue.Name+":"))
 				index, err := strconv.Atoi(string(indexBytes))
 				consMu.Lock()
 				defer consMu.Unlock()
@@ -239,22 +193,20 @@ func TestConsumer_Load(t *testing.T) {
 			for i := 0; i < msgCount/2; i++ {
 				go func(i int) {
 					errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
-						Exchange:   c.QueueBindings[0].ExchangeName,
-						RoutingKey: c.QueueBindings[0].RoutingKey,
+						RoutingKey: c.Queue.Name,
 						Mandatory:  true,
 						Publishing: amqp.Publishing{
-							Body: []byte(fmt.Sprint(c.QueueBindings[0].RoutingKey, ":", i)),
+							Body: []byte(fmt.Sprint(c.Queue.Name, ":", i)),
 						},
 					})
 				}(i)
 			}
 			for i := msgCount / 2; i < msgCount; i++ {
 				errChan <- publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{
-					Exchange:   c.QueueBindings[0].ExchangeName,
-					RoutingKey: c.QueueBindings[0].RoutingKey,
+					RoutingKey: c.Queue.Name,
 					Mandatory:  true,
 					Publishing: amqp.Publishing{
-						Body: []byte(fmt.Sprint(c.QueueBindings[0].RoutingKey, ":", i)),
+						Body: []byte(fmt.Sprint(c.Queue.Name, ":", i)),
 					},
 				})
 			}
@@ -275,32 +227,51 @@ func TestConsumer_Load(t *testing.T) {
 
 // RabbitMQ behaviour around auto generated names and restricting declaring queues with amq prefix
 func TestRMQConsumer_AutogeneratedQueueNames(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute/2)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	logf := slog.Log
-	internal.WrapLogFunc(&logf)
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
-
-	// NewConsumer with an empty config will only declare a queue with an anonymous, RabbitMQ generated name
-	cons := rmq.NewConsumer(rmq.ConsumerConfig{})
-	mqChan, err := cons.Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf("failed to declare %v", err)
-	}
-	_ = mqChan.Close()
-
+	// NewConsumer with an empty Queue.Name will declare a queue with a RabbitMQ generated name
+	// This is useless unless the config also includes QueueBindings, since reconnections cause RabbitMQ to generate a different name anyway
+	cons := rmq.NewConsumer(rmq.ConsumerConfig{
+		QueueBindings: []rmq.QueueBinding{
+			{ExchangeName: "amq.fanout", RoutingKey: "TestRMQConsumer_AutogeneratedQueueNames"},
+		},
+		Qos:              rmq.Qos{PrefetchCount: 1},
+		Log:              slog.Log,
+		MinRetryInterval: time.Second / 64,
+	})
+	deliveries := cons.Consume(ctx, rmqConn)
+	// Wait a sec for Consume to actually bring up the queue, since otherwise a published message could happen before a queue is declared.
+	// danlock/rmq best practice to only use queues named in your Topology so you won't have to remember this.
+	time.Sleep(time.Second / 3)
 	amqpConn, err := rmqConn.CurrentConnection(ctx)
 	if err != nil {
 		t.Fatalf("failed getting current connection %v", err)
 	}
 	amqpConn.CloseDeadline(time.Now().Add(time.Minute))
 
-	// Declaring this twice should work without errors
-	mqChan, err = cons.Declare(ctx, rmqConn)
-	if err != nil {
-		t.Fatalf("failed to declare %v", err)
+	// Declaring again should work without errors, but it will create a different queue rather than consuming from the first one.
+	// rmq.Consumer could remember the last queue name to consume from it again, but that wouldn't be reliable with auto-deleted or expiring queues.
+	// It's simpler to disallow that use case by not making RabbitMQ generated queue names available from rmq.Consumer.
+	secondDeliveries := cons.Consume(ctx, rmqConn)
+	publisher := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: slog.Log, LogReturns: true})
+	pubCount := 10
+	time.Sleep(time.Second / 3)
+
+	for i := 0; i < pubCount; i++ {
+		go publisher.PublishUntilAcked(ctx, 0, rmq.Publishing{Exchange: "amq.fanout", RoutingKey: "TestRMQConsumer_AutogeneratedQueueNames", Mandatory: true})
 	}
-	_ = mqChan.Close()
+
+	for i := 0; i < pubCount; i++ {
+		select {
+		case msg := <-deliveries:
+			msg.Ack(false)
+		case msg := <-secondDeliveries:
+			msg.Ack(false)
+		case <-ctx.Done():
+			t.Fatalf("timed out on delivery %d", i)
+		}
+	}
 }

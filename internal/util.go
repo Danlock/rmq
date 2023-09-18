@@ -30,19 +30,32 @@ func CalculateDelay(min, max, current time.Duration) time.Duration {
 	}
 }
 
+// slog.Log's function signature. Useful for context aware logging and simpler to wrap than an interface like slog.Handler
+type SlogLog = func(context.Context, slog.Level, string, ...any)
+
 // WrapLogFunc runs fmt.Sprintf on the msg, args parameters so the end user can use slog.Log or any other logging library more interchangeably.
-// The slog.Log func signature is convenient for providing an easily wrappable log func, and is better than the usual func(string, any...).
+// The slog.Log func signature is an improvement over the usual func(string, any...).
 // The end user can take advantage of context for log tracing, slog.Level to ignore warnings, and we only depend on the stdlib.
 // This does mean calldepth loggers will need a +1 however.
-func WrapLogFunc(logFunc *func(ctx context.Context, level slog.Level, msg string, args ...any)) {
+func WrapLogFunc(logFunc *SlogLog) {
 	if logFunc == nil {
 		panic("WrapLogFunc called with nil")
 	} else if *logFunc == nil {
-		*logFunc = func(ctx context.Context, level slog.Level, msg string, args ...any) {}
+		*logFunc = func(context.Context, slog.Level, string, ...any) {}
 	} else {
 		userLog := *logFunc
 		*logFunc = func(ctx context.Context, level slog.Level, msg string, args ...any) {
 			userLog(ctx, level, fmt.Sprintf(msg, args...))
 		}
 	}
+}
+
+// AMQP091Logger wraps the amqp091 Logger interface with a little boilerplate.
+type AMQP091Logger struct {
+	Ctx context.Context
+	Log SlogLog
+}
+
+func (l AMQP091Logger) Printf(format string, v ...interface{}) {
+	l.Log(l.Ctx, slog.LevelError, "rabbitmq/amqp091-go: "+fmt.Sprintf(format, v...))
 }

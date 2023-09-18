@@ -32,6 +32,7 @@ func TestPublisher(t *testing.T) {
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
 		Log:          logf,
 		NotifyReturn: returnChan,
+		LogReturns:   true,
 	})
 	forceRedial := func() {
 		amqpConn, err := rmqConn.CurrentConnection(ctx)
@@ -55,9 +56,9 @@ func TestPublisher(t *testing.T) {
 	retPub := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "nowhere", Mandatory: true}
 	retPub.Body = []byte("return me")
 
-	_, err = rmqPub.Publish(pubCtx, retPub)
+	err = rmqPub.PublishUntilAcked(pubCtx, 0, retPub)
 	if err != nil {
-		t.Fatalf("PublishUntilConfirmed failed with %v", err)
+		t.Fatalf("PublishUntilAcked failed with %v", err)
 	}
 	forceRedial()
 	select {

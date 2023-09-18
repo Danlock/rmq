@@ -13,11 +13,16 @@ import (
 
 type PublisherConfig struct {
 	// NotifyReturn will receive amqp.Return's from any amqp.Channel this rmq.Publisher sends on.
-	// Recommended to use a buffered channel.
+	// Recommended to use a buffered channel. Closed after the publisher's context is done.
 	NotifyReturn chan<- amqp.Return
+	// LogReturns without their amqp.Return.Body using PublisherConfig.Log.
+	LogReturns bool
 
 	// DontConfirm will not set the amqp.Channel in Confirm mode, and disallow PublishUntilConfirmed.
 	DontConfirm bool
+
+	// AMQPTimeout sets a default timeout for AMQP operations. Defaults to 30 seconds.
+	AMQPTimeout time.Duration
 
 	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
 	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
@@ -39,6 +44,10 @@ func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherConf
 		panic("rmq.NewPublisher called with nil ctx or rmqConn")
 	}
 	internal.WrapLogFunc(&config.Log)
+
+	if config.AMQPTimeout == 0 {
+		config.AMQPTimeout = 30 * time.Second
+	}
 
 	if config.MinRetryInterval == 0 {
 		config.MinRetryInterval = time.Second / 8
@@ -68,14 +77,12 @@ func (p *Publisher) connect(rmqConn *Connection) {
 			return
 		case <-time.After(delay):
 		}
-
 		mqChan, err := rmqConn.Channel(p.ctx)
 		if err != nil {
 			delay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, delay)
 			p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to get amqp.Channel. Retrying in %s due to err %+v", delay.String(), err)
 			continue
 		}
-
 		if !p.config.DontConfirm {
 			if err := mqChan.Confirm(false); err != nil {
 				delay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, delay)
@@ -86,31 +93,57 @@ func (p *Publisher) connect(rmqConn *Connection) {
 
 		// Successfully got a channel for publishing, reset delay
 		delay = 0
-
-		if p.config.NotifyReturn != nil {
-			// Try not to repeat streadway/amqp's mistake of deadlocking if a client isn't listening to their Notify* channel.
-			// (https://github.com/rabbitmq/amqp091-go/issues/18)
-			// Spin off a goroutine that echos this amqp.Channel's Return's until the amqp.Channel closes
-			go func() {
-				for r := range mqChan.NotifyReturn(make(chan amqp.Return)) {
-					// If they aren't listening to p.config.NotifyReturn, just drop the message instead of deadlocking and leaking goroutines
-					select {
-					case p.config.NotifyReturn <- r:
-					default:
-						p.config.Log(p.ctx, slog.LevelWarn, logPrefix+" NotifyReturn lacking listeners, dropping amqp.Return %+v", r)
-					}
-				}
-			}()
-		}
-
+		p.handleReturns(mqChan)
 		p.listen(mqChan)
 	}
+}
+
+const dropReturnsAfter = 10 * time.Millisecond
+
+// handleReturns echos the amqp.Channel's Return's until it closes
+func (p *Publisher) handleReturns(mqChan *amqp.Channel) {
+	logPrefix := "rmq.Publisher.handleReturns"
+	if p.config.NotifyReturn == nil && !p.config.LogReturns {
+		return
+	}
+	notifyReturns := mqChan.NotifyReturn(make(chan amqp.Return))
+	go func() {
+		dropTimer := time.NewTimer(0)
+		for r := range notifyReturns {
+			if p.config.LogReturns {
+				// A Body can be arbitrarily large and/or contain sensitve info. Don't log it by default.
+				rBody := r.Body
+				r.Body = nil
+				p.config.Log(p.ctx, slog.LevelWarn, logPrefix+" got %+v", r)
+				r.Body = rBody
+			}
+			if p.config.NotifyReturn == nil {
+				continue
+			}
+			// Why is reusing a timer so bloody complicated... It's almost worth the timer leak just to reduce complexity
+			if !dropTimer.Stop() {
+				<-dropTimer.C
+			}
+			dropTimer.Reset(dropReturnsAfter)
+			// Try not to repeat streadway/amqp's mistake of deadlocking if a client isn't listening to their Notify* channel.
+			// (https://github.com/rabbitmq/amqp091-go/issues/18)
+			// If they aren't listening to p.config.NotifyReturn, just drop the amqp.Return instead of deadlocking and leaking goroutines
+			select {
+			case p.config.NotifyReturn <- r:
+				dropTimer.Stop()
+			case <-dropTimer.C:
+			}
+		}
+		// Close when the context is done, since we wont be sending anymore returns
+		if p.config.NotifyReturn != nil && p.ctx.Err() != nil {
+			close(p.config.NotifyReturn)
+		}
+	}()
 }
 
 // listen sends publishes on a amqp.Channel until it's closed.
 func (p *Publisher) listen(mqChan *amqp.Channel) {
 	logPrefix := "rmq.Publisher.listen"
-	notifyClose := mqChan.NotifyClose(make(chan *amqp.Error, 2))
 	finishedPublishing := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(p.ctx)
 	defer cancel()
@@ -127,6 +160,7 @@ func (p *Publisher) listen(mqChan *amqp.Channel) {
 		}
 	}()
 
+	notifyClose := mqChan.NotifyClose(make(chan *amqp.Error, 2))
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -242,10 +276,9 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 // Nacks can happen for a variety of reasons, ranging from user error (mistyped exchange) to RabbitMQ internal errors.
 //
 // PublishUntilAcked will republish a Mandatory Publishing with a nonexistent exchange forever (until the exchange exists), as one example.
-// AMQP does ack returned Publishing's so monitor the NotifyReturn chan to make sure your Publishing's are getting delivered.
+// RabbitMQ acks Publishing's so monitor the NotifyReturn chan to ensure your Publishing's are being delivered.
 //
 // PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or temporary RabbitMQ node failures.
-// Recommended to call with context.WithTimeout.
 func (p *Publisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.Duration, pub Publishing) error {
 	logPrefix := "rmq.Publisher.PublishUntilAcked"
 	nacks := 0

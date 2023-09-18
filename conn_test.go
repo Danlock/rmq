@@ -133,7 +133,7 @@ func TestConnection_Channel(t *testing.T) {
 	slowRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
-	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Log: slog.Log, AMQPChannelTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
+	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Log: slog.Log, AMQPTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
 
