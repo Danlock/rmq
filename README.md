@@ -1,5 +1,5 @@
 # rmq
-![Coverage](https://img.shields.io/badge/Coverage-87.9%25-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-86.4%25-brightgreen)
 [![Go Report Card](https://goreportcard.com/badge/github.com/danlock/rmq)](https://goreportcard.com/report/github.com/danlock/rmq)
 [![Go Reference](https://pkg.go.dev/badge/github.com/danlock/rmq.svg)](https://pkg.go.dev/github.com/danlock/rmq)
 
