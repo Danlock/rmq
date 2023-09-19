@@ -20,14 +20,9 @@ type ChanResp[T any] struct {
 	Err error
 }
 
-func CalculateDelay(min, max, current time.Duration) time.Duration {
-	if current <= 0 {
-		return min
-	} else if current < max {
-		return current * 2
-	} else {
-		return max
-	}
+var FibonacciDurations = [...]time.Duration{
+	0, time.Second, time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second,
+	8 * time.Second, 13 * time.Second, 21 * time.Second, 34 * time.Second,
 }
 
 // slog.Log's function signature. Useful for context aware logging and simpler to wrap than an interface like slog.Handler

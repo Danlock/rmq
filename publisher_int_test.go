@@ -18,9 +18,8 @@ func TestPublisher(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	logf := slog.Log
-
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: logf}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	baseCfg := rmq.CommonConfig{Log: slog.Log}
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{CommonConfig: baseCfg}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
 	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
 	_, err := unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, rmq.Publishing{})
@@ -30,7 +29,7 @@ func TestPublisher(t *testing.T) {
 
 	returnChan := make(chan amqp.Return, 5)
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
-		Log:          logf,
+		CommonConfig: baseCfg,
 		NotifyReturn: returnChan,
 		LogReturns:   true,
 	})

@@ -17,7 +17,8 @@ import (
 
 func TestDeclareTopology(t *testing.T) {
 	ctx := context.Background()
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	baseCfg := rmq.CommonConfig{Log: slog.Log}
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{CommonConfig: baseCfg}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 	suffix := fmt.Sprintf("%s|%p", time.Now(), t)
 	baseTopology := rmq.Topology{
 		Exchanges: []rmq.Exchange{{

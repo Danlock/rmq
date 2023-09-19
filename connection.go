@@ -24,19 +24,31 @@ type AMQPConnection interface {
 }
 
 type ConnectConfig struct {
+	CommonConfig
 	// Topology will be declared each connection to mitigate downed RabbitMQ nodes. Recommended to set, but not required.
 	Topology Topology
-	// AMQPTimeout will set a timeout on AMQP operations. Defaults to 1 minute.
-	AMQPTimeout time.Duration
-	// *RedialInterval implements backoff on AMQP dials. Defaults to 0.125 seconds to 32 seconds.
-	MinRedialInterval, MaxRedialInterval time.Duration
-	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
-	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
 func ConnectWithURL(ctx context.Context, conf ConnectConfig, amqpURL string) *Connection {
 	return Connect(ctx, conf, func() (AMQPConnection, error) {
 		return amqp.Dial(amqpURL)
+	})
+}
+
+func ConnectWithURLs(ctx context.Context, conf ConnectConfig, amqpURLs ...string) *Connection {
+	if len(amqpURLs) == 0 {
+		panic("ConnectWithURLs needs amqpURLs!")
+	}
+	return Connect(ctx, conf, func() (AMQPConnection, error) {
+		var errs error
+		for _, amqpURL := range amqpURLs {
+			amqpConn, err := amqp.Dial(amqpURL)
+			if err == nil {
+				return amqpConn, nil
+			}
+			errs = errors.Join(err)
+		}
+		return nil, errs
 	})
 }
 
@@ -49,31 +61,20 @@ func ConnectWithAMQPConfig(ctx context.Context, conf ConnectConfig, amqpURL stri
 var setAMQP091Logger sync.Once
 
 // Connect returns a resilient, redialable AMQP connection that runs until it's context is canceled.
-// Look at rmq.Pubilsher and rmq.Consumer for practical examples of use,
-// but the idea is to call Channel and use it until error. Then rinse and repeat.
 // Each Channel() call triggers rmq.Connection to return an amqp.Channel from it's CurrentConnection() or redial with the provided dialFn for a new AMQP Connection.
+// ConnectWith* functions provide a few simple dialFn's for ease of use. They can be a simple wrapper around an amqp.Dial or much more complicated.
+// If you want to ensure the Connection is working, call MustChannel with a timeout.
 func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnection, error)) *Connection {
 	if dialFn == nil || ctx == nil {
 		panic("Connect requires a ctx and a dialFn")
 	}
-	// Thread safely set the amqp091 logger so it's included within danlock/rmq Logs.
+	// Thread safely set the amqp091 logger so it's included within danlock/rmq Connection Logs.
 	if conf.Log != nil {
 		setAMQP091Logger.Do(func() {
 			amqp.SetLogger(internal.AMQP091Logger{ctx, conf.Log})
 		})
 	}
-	internal.WrapLogFunc(&conf.Log)
-
-	if conf.AMQPTimeout == 0 {
-		conf.AMQPTimeout = time.Minute
-	}
-
-	if conf.MinRedialInterval == 0 {
-		conf.MinRedialInterval = time.Second / 8
-	}
-	if conf.MaxRedialInterval == 0 {
-		conf.MaxRedialInterval = 32 * time.Second
-	}
+	conf.setDefaults()
 
 	conn := Connection{
 		ctx:               ctx,
@@ -122,12 +123,36 @@ type Connection struct {
 }
 
 // Channel requests an AMQP channel from the current AMQP Connection.
-// Recommended to set ConnectConfig.AMQPChannelTimeout or use context.WithTimeout.
 // On errors the rmq.Connection will redial, and the caller is expected to call Channel() again for a new connection.
 func (c *Connection) Channel(ctx context.Context) (*amqp.Channel, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.config.AMQPTimeout)
 	defer cancel()
 	return request(c.ctx, ctx, c.chanReqChan)
+}
+
+// MustChannel calls Channel on an active Connection until it's context times out or it successfully gets a Channel.
+// Recommended to use context.WithTimeout.
+func (c *Connection) MustChannel(ctx context.Context) (*amqp.Channel, error) {
+	logPrefix := "rmq.Connection.MustChannel"
+	errs := make([]error, 0)
+	for {
+		select {
+		case <-ctx.Done():
+			errs = append(errs, fmt.Errorf(logPrefix+" timed out due to %w", context.Cause(ctx)))
+			return nil, errors.Join(errs...)
+		case <-c.ctx.Done():
+			errs = append(errs, fmt.Errorf(logPrefix+" Connection timed out due to %w", context.Cause(c.ctx)))
+			return nil, errors.Join(errs...)
+		default:
+		}
+
+		mqChan, err := c.Channel(ctx)
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			return mqChan, nil
+		}
+	}
 }
 
 // CurrentConnection requests the current AMQPConnection being used by rmq.Connection.
@@ -151,6 +176,7 @@ func (c *Connection) CurrentConnection(ctx context.Context) (AMQPConnection, err
 func (c *Connection) redial(dialFn func() (AMQPConnection, error)) {
 	logPrefix := "rmq.Connection.redial"
 	var dialDelay time.Duration
+	attempt := 0
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -160,21 +186,22 @@ func (c *Connection) redial(dialFn func() (AMQPConnection, error)) {
 
 		amqpConn, err := dialFn()
 		if err != nil {
-			// Configure our backoff according to parameters
-			dialDelay = internal.CalculateDelay(c.config.MinRedialInterval, c.config.MaxRedialInterval, dialDelay)
+			dialDelay = c.config.Delay(attempt)
+			attempt++
 			c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed, retrying after %s. err: %+v", dialDelay.String(), err)
 			continue
 		}
 
 		// Redeclare Topology if we have one. This has the bonus aspect of making sure the connection is actually usable, better than a Ping.
 		if err := DeclareTopology(c.ctx, amqpConn, c.config.Topology); err != nil {
-			dialDelay = internal.CalculateDelay(c.config.MinRedialInterval, c.config.MaxRedialInterval, dialDelay)
+			dialDelay = c.config.Delay(attempt)
+			attempt++
 			c.config.Log(c.ctx, slog.LevelError, logPrefix+" DeclareTopology failed, retrying after %s. err: %+v", dialDelay.String(), err)
 			continue
 		}
 
-		// After a successful dial and topology declare, reset our dial delay
-		dialDelay = 0
+		// After a successful dial and topology declare, reset our attempts and delay
+		dialDelay, attempt = 0, 0
 
 		c.listen(amqpConn)
 	}

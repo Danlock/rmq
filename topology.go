@@ -15,15 +15,12 @@ import (
 
 // Topology contains all the exchange, queue and binding information needed for your application to use RabbitMQ.
 type Topology struct {
+	CommonConfig
+
 	Exchanges        []Exchange
 	ExchangeBindings []ExchangeBinding
 	Queues           []Queue
 	QueueBindings    []QueueBinding
-
-	// AMQPTimeout sets a timeout on AMQP operations. Defaults to 1 minute.
-	AMQPTimeout time.Duration
-	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
-	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
 // Exchange contains args for amqp.Channel.ExchangeDeclare
@@ -56,9 +53,7 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 		return nil
 	}
 
-	if topology.AMQPTimeout == 0 {
-		topology.AMQPTimeout = time.Minute
-	}
+	topology.setDefaults()
 	ctx, cancel := context.WithTimeout(ctx, topology.AMQPTimeout)
 	defer cancel()
 

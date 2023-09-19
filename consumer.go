@@ -13,17 +13,12 @@ import (
 
 // ConsumerConfig contains information needed to declare and consume deliveries from a queue.
 type ConsumerConfig struct {
+	CommonConfig
+
 	Queue         Queue
 	QueueBindings []QueueBinding // Should only be used for anonymous queues, otherwise QueueBinding's be declared with DeclareTopology
 	Consume       Consume
 	Qos           Qos
-
-	// AMQPTimeout sets a timeout on all AMQP requests. Defaults to 30 seconds.
-	AMQPTimeout time.Duration
-	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
-	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
-	// *RetryInterval controls how frequently rmq.Consumer.Process retries on errors. Defaults from 0.125 seconds to 32 seconds.
-	MinRetryInterval, MaxRetryInterval time.Duration
 }
 
 // Queue contains args for amqp.Channel.QueueDeclare
@@ -72,17 +67,7 @@ type Consumer struct {
 // and returns a rmq.Consumer that can redeclare this topology on any errors during queue consumption.
 // This enables robust reconnections even on unreliable networks.
 func NewConsumer(config ConsumerConfig) *Consumer {
-	if config.AMQPTimeout == 0 {
-		config.AMQPTimeout = 30 * time.Second
-	}
-	internal.WrapLogFunc(&config.Log)
-
-	if config.MinRetryInterval == 0 {
-		config.MinRetryInterval = time.Second / 8
-	}
-	if config.MaxRetryInterval == 0 {
-		config.MaxRetryInterval = 32 * time.Second
-	}
+	config.setDefaults()
 	return &Consumer{config: config}
 }
 
@@ -192,7 +177,7 @@ func (c *Consumer) Consume(ctx context.Context, rmqConn *Connection) <-chan amqp
 	go func() {
 		logPrefix := fmt.Sprintf("rmq.Consumer.Consume for queue (%s)", c.config.Queue.Name)
 		var delay time.Duration
-
+		attempt := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -202,13 +187,14 @@ func (c *Consumer) Consume(ctx context.Context, rmqConn *Connection) <-chan amqp
 			}
 			mqChan, inChan, err := c.safeDeclareAndConsume(ctx, rmqConn)
 			if err != nil {
-				delay = internal.CalculateDelay(c.config.MinRetryInterval, c.config.MaxRetryInterval, delay)
+				delay = c.config.Delay(attempt)
+				attempt++
 				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to safeDeclareAndConsume. Retrying in %s due to %v", delay.String(), err)
 				continue
 			}
 
 			// Successfully redeclared our topology, so reset the backoff
-			delay = 0
+			delay, attempt = 0, 0
 
 			c.forwardDeliveries(ctx, mqChan, inChan, outChan)
 		}

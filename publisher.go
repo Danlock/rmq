@@ -12,6 +12,7 @@ import (
 )
 
 type PublisherConfig struct {
+	CommonConfig
 	// NotifyReturn will receive amqp.Return's from any amqp.Channel this rmq.Publisher sends on.
 	// Recommended to use a buffered channel. Closed after the publisher's context is done.
 	NotifyReturn chan<- amqp.Return
@@ -20,15 +21,6 @@ type PublisherConfig struct {
 
 	// DontConfirm will not set the amqp.Channel in Confirm mode, and disallow PublishUntilConfirmed.
 	DontConfirm bool
-
-	// AMQPTimeout sets a default timeout for AMQP operations. Defaults to 30 seconds.
-	AMQPTimeout time.Duration
-
-	// Log can be left nil, set with slog.Log or wrapped around your favorite logging library
-	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
-
-	// *RetryInterval controls how frequently rmq.Publisher retries on errors. Defaults from 0.125 seconds to 32 seconds.
-	MinRetryInterval, MaxRetryInterval time.Duration
 }
 
 type Publisher struct {
@@ -43,18 +35,7 @@ func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherConf
 	if ctx == nil || rmqConn == nil {
 		panic("rmq.NewPublisher called with nil ctx or rmqConn")
 	}
-	internal.WrapLogFunc(&config.Log)
-
-	if config.AMQPTimeout == 0 {
-		config.AMQPTimeout = 30 * time.Second
-	}
-
-	if config.MinRetryInterval == 0 {
-		config.MinRetryInterval = time.Second / 8
-	}
-	if config.MaxRetryInterval == 0 {
-		config.MaxRetryInterval = 32 * time.Second
-	}
+	config.setDefaults()
 
 	pub := &Publisher{
 		ctx:    ctx,
@@ -70,7 +51,7 @@ func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherConf
 func (p *Publisher) connect(rmqConn *Connection) {
 	logPrefix := "rmq.Publisher.connect"
 	var delay time.Duration
-
+	attempt := 0
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -79,20 +60,22 @@ func (p *Publisher) connect(rmqConn *Connection) {
 		}
 		mqChan, err := rmqConn.Channel(p.ctx)
 		if err != nil {
-			delay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, delay)
+			delay = p.config.Delay(attempt)
+			attempt++
 			p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to get amqp.Channel. Retrying in %s due to err %+v", delay.String(), err)
 			continue
 		}
 		if !p.config.DontConfirm {
 			if err := mqChan.Confirm(false); err != nil {
-				delay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, delay)
+				delay = p.config.Delay(attempt)
+				attempt++
 				p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to put amqp.Channel in confirm mode. Retrying in %s due to err %+v", delay.String(), err)
 				continue
 			}
 		}
 
 		// Successfully got a channel for publishing, reset delay
-		delay = 0
+		delay, attempt = 0, 0
 		p.handleReturns(mqChan)
 		p.listen(mqChan)
 	}
@@ -241,10 +224,12 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 	}
 
 	var pubDelay time.Duration
+	attempt := 0
 	for {
 		defConf, err := p.Publish(ctx, pub)
 		if err != nil {
-			pubDelay = internal.CalculateDelay(p.config.MinRetryInterval, p.config.MaxRetryInterval, pubDelay)
+			pubDelay = p.config.Delay(attempt)
+			attempt++
 			p.config.Log(ctx, slog.LevelError, logPrefix+" got a Publish error. Republishing due to %v", err)
 			select {
 			case <-ctx.Done():
@@ -254,7 +239,7 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 			}
 		}
 		// reset the delay on success
-		pubDelay = 0
+		pubDelay, attempt = 0, 0
 
 		confirmTimeout := time.NewTimer(confirmTimeout)
 		defer confirmTimeout.Stop()

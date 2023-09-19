@@ -34,30 +34,36 @@ func Example() {
 	customLog := func(ctx context.Context, level slog.Level, msg string, args ...any) {
 		log.Printf("[%s] trace_id=%v msg="+msg, append([]any{level, ctx.Value("your_embedded_trace_id")}, args...)...)
 	}
-
+	commonCfg := rmq.CommonConfig{Log: customLog}
 	// Create an AMQP topology for our healthcheck, which uses a temporary exchange.
 	// Design goals of danlock/rmq include reducing the amount of naked booleans in function signatures.
 	topology := rmq.Topology{
+		CommonConfig:  commonCfg,
 		Exchanges:     []rmq.Exchange{{Name: "healthcheck", Kind: amqp.ExchangeDirect, AutoDelete: true}},
 		Queues:        []rmq.Queue{{Name: "healthcheck", AutoDelete: true}},
 		QueueBindings: []rmq.QueueBinding{{QueueName: "healthcheck", ExchangeName: "healthcheck"}},
-		Log:           slog.Log,
 	}
 	// danlock/rmq best practice is including your applications topology in your ConnectConfig
-	cfg := rmq.ConnectConfig{Log: customLog, Topology: topology}
+	cfg := rmq.ConnectConfig{CommonConfig: commonCfg, Topology: topology}
 	// RabbitMQ best practice is to pub and sub on different AMQP connections to avoid TCP backpressure causing issues with message consumption.
 	pubRMQConn := rmq.ConnectWithURL(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
 	subRMQConn := rmq.ConnectWithURL(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
 
+	// A rudimentary healthcheck of a rmq.Connection is to ensure it can get a Channel, but we can do better
+	_, err := subRMQConn.MustChannel(ctx)
+	if err != nil {
+		panic("couldn't get a channel")
+	}
+
 	rmqCons := rmq.NewConsumer(rmq.ConsumerConfig{
-		Queue: topology.Queues[0],
-		Qos:   rmq.Qos{PrefetchCount: 10},
-		Log:   slog.Log,
+		CommonConfig: commonCfg,
+		Queue:        topology.Queues[0],
+		Qos:          rmq.Qos{PrefetchCount: 10},
 	})
 	// Now we have a RabbitMQ queue with messages incoming on the deliveries channel, even if the network flakes.
 	deliveries := rmqCons.Consume(ctx, subRMQConn)
 
-	rmqPub := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{Log: slog.Log})
+	rmqPub := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{CommonConfig: commonCfg})
 	// Now we have an AMQP publisher that can sends messages with at least once delivery.
 	// Generate "unique" messages for our healthchecker to check later
 	baseMsg := rmq.Publishing{Exchange: topology.Exchanges[0].Name, Mandatory: true}

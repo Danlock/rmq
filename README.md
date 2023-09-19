@@ -25,15 +25,17 @@ Using an AMQP publisher to publish a message with at least once delivery.
 
 ```
 ctx := context.TODO()
-rmqConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("AMQP_URL"))
+cfg := rmq.CommonConfig{Log: slog.Log}
 
-rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{Log: slog.Log})
+rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL_1"), os.Getenv("AMQP_URL_2"))
+
+rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{CommonConfig: cfg})
 
 msg := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "somewhere", Mandatory: true}
 msg.Body = []byte(`{"life": 42}`)
 
 if err := rmqPub.PublishUntilAcked(ctx, time.Minute, msg); err != nil {
-    return fmt.Errorf("PublishUntilAcked took longer than a minute because %w", err)
+    return fmt.Errorf("PublishUntilAcked timed out because %w", err)
 }
 ```
 
@@ -41,12 +43,14 @@ Using a reliable AMQP consumer that delivers messages through transient network 
 
 ```
 ctx := context.TODO()
-rmqConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{Log: slog.Log}, os.Getenv("AMQP_URL"))
+cfg := rmq.CommonConfig{Log: slog.Log}
+
+rmqConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL"))
 
 consCfg := 	rmq.ConsumerConfig{
+        CommonConfig: cfg,
 		Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
 		Qos: rmq.Qos{PrefetchCount: 100},
-        Log:              slog.Log,
 }
 
 rmq.NewConsumer(consCfg).ConsumeConcurrently(ctx, rmqConn, 50, func(ctx context.Context, msg amqp.Delivery) {

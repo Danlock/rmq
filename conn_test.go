@@ -120,9 +120,9 @@ func TestConnection_Channel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
+	baseCfg := CommonConfig{Log: slog.Log}
 	connConf := ConnectConfig{
-		Log: slog.Log,
+		CommonConfig: baseCfg,
 	}
 	goodRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return goodMockAMQP, nil
@@ -133,7 +133,8 @@ func TestConnection_Channel(t *testing.T) {
 	slowRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
-	slowUsingTimeoutRMQConn := Connect(ctx, ConnectConfig{Log: slog.Log, AMQPTimeout: 50 * time.Millisecond}, func() (AMQPConnection, error) {
+	slowConfig := ConnectConfig{CommonConfig: CommonConfig{Log: slog.Log, AMQPTimeout: 50 * time.Millisecond}}
+	slowUsingTimeoutRMQConn := Connect(ctx, slowConfig, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
 
@@ -180,9 +181,10 @@ func TestConnection_Channel(t *testing.T) {
 	}
 
 	connConf = ConnectConfig{
-		Log:               connConf.Log,
-		MinRedialInterval: time.Millisecond,
-		MaxRedialInterval: 3 * time.Millisecond,
+		CommonConfig: CommonConfig{
+			Log:   connConf.Log,
+			Delay: func(attempt int) time.Duration { return time.Duration(attempt) * time.Millisecond },
+		},
 	}
 
 	flakyCount := 0
