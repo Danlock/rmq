@@ -96,7 +96,7 @@ func Example() {
 			panic("where's my message?")
 		case msg := <-deliveries:
 			if !reflect.DeepEqual(msg.Body, msgOne.Body) && !reflect.DeepEqual(msg.Body, msgTwo.Body) {
-				panic("realistically this would probably be an error with another instance using this healthcheck simultaenously. Prevent this with an unique exchange or topic exchange with unique routing keys.")
+				panic("realistically this would probably be an error with another instance using this healthcheck simultaneously. Prevent this with an unique exchange or topic exchange with unique routing keys.")
 			}
 		}
 	}

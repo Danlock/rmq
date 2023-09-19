@@ -20,6 +20,15 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+func ForceRedial(ctx context.Context, rmqConn *rmq.Connection) error {
+	amqpConn, err := rmqConn.CurrentConnection(ctx)
+	if err != nil {
+		return fmt.Errorf("rmqConn.CurrentConnection failed because %w", err)
+	}
+	// close the current connection to force a redial
+	return amqpConn.CloseDeadline(time.Now().Add(time.Minute))
+}
+
 func TestConsumer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -57,15 +66,7 @@ func TestConsumer(t *testing.T) {
 	unreliableRMQPub.Publish(ctx, rmq.Publishing{Exchange: "amq.fanout"})
 	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{CommonConfig: connectCfg.CommonConfig})
 
-	forceRedial := func() {
-		amqpConn, err := rmqConn.CurrentConnection(ctx)
-		if err != nil {
-			t.Fatalf("failed to get rmqConn's current connection %v", err)
-		}
-		// close the current connection to force a redial
-		amqpConn.CloseDeadline(time.Now().Add(time.Minute))
-	}
-	forceRedial()
+	ForceRedial(ctx, rmqConn)
 	pubCtx, pubCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pubCancel()
 
@@ -79,14 +80,14 @@ func TestConsumer(t *testing.T) {
 			errChan <- rmqPub.PublishUntilAcked(pubCtx, 0, wantedPub)
 		}()
 	}
-	forceRedial()
+	ForceRedial(ctx, rmqConn)
 
 	for i := 0; i < pubCount; i++ {
 		if err := <-errChan; err != nil {
 			t.Fatalf("PublishUntilAcked returned unexpected error %v", err)
 		}
 		if i%2 == 0 {
-			forceRedial()
+			ForceRedial(ctx, rmqConn)
 		}
 	}
 
@@ -131,8 +132,7 @@ func TestConsumer_Load(t *testing.T) {
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Second):
-				amqpConn, _ := rmqConn.CurrentConnection(ctx)
-				amqpConn.CloseDeadline(time.Now().Add(time.Minute))
+				ForceRedial(ctx, rmqConn)
 			}
 		}
 	}

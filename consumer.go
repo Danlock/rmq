@@ -225,7 +225,7 @@ func (c *Consumer) forwardDeliveries(ctx context.Context, mqChan *amqp.Channel, 
 			// If the client never listens to outChan, this blocks forever
 			// Other options include using select with a default and dropping the message if the client doesn't listen, dropping the message after a timeout,
 			// or buffering messages and sending them again later. Of course the buffer could grow forever in that case without listeners.
-			// The only thing blocked would be the rmq.Consumer.Consume goroutine listening for reconnects and logging errors, which seem unneccessary without a listener anyway.
+			// The only thing blocked would be the rmq.Consumer.Consume goroutine listening for reconnects and logging errors, which seem unnecessary without a listener anyway.
 			// Alls well since we don't lock up the entire amqp.Connection like streadway/amqp with Notify* channels...
 			outChan <- msg
 		}

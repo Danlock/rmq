@@ -68,7 +68,7 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 			return
 		}
 		err = topology.declare(ctx, mqChan)
-		// An amqp.Channel must not be used from multiple goroutines simultaenously, so close it inside this goroutine to prevent cryptic RabbitMQ errors.
+		// An amqp.Channel must not be used from multiple goroutines simultaneously, so close it inside this goroutine to prevent cryptic RabbitMQ errors.
 		mqChanErr := mqChan.Close()
 		// Should we join mqChanErr if err is nil? When declare succeeeds a Close error is fairly inconsequential. Maybe just log it in that case? Food for thought.
 		if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {

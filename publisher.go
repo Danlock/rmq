@@ -238,8 +238,7 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 				continue
 			}
 		}
-		// reset the delay on success
-		pubDelay, attempt = 0, 0
+		attempt = 0
 
 		confirmTimeout := time.NewTimer(confirmTimeout)
 		defer confirmTimeout.Stop()

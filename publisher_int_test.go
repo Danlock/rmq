@@ -33,15 +33,7 @@ func TestPublisher(t *testing.T) {
 		NotifyReturn: returnChan,
 		LogReturns:   true,
 	})
-	forceRedial := func() {
-		amqpConn, err := rmqConn.CurrentConnection(ctx)
-		if err != nil {
-			t.Fatalf("failed to get rmqConn's current connection %v", err)
-		}
-		// close the current connection to force a redial
-		amqpConn.CloseDeadline(time.Now().Add(time.Minute))
-	}
-	forceRedial()
+	ForceRedial(ctx, rmqConn)
 	pubCtx, pubCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer pubCancel()
 
@@ -59,7 +51,7 @@ func TestPublisher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublishUntilAcked failed with %v", err)
 	}
-	forceRedial()
+	ForceRedial(ctx, rmqConn)
 	select {
 	case <-pubCtx.Done():
 		t.Fatalf("didnt get return")

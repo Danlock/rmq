@@ -96,17 +96,17 @@ func request[T any](connCtx, ctx context.Context, reqChan chan internal.ChanReq[
 	respChan := make(chan internal.ChanResp[T], 1)
 	select {
 	case <-connCtx.Done():
-		return t, fmt.Errorf("rmq.Connection context finished: %w", context.Cause(connCtx))
+		return t, fmt.Errorf("rmq.Connection context timed out because %w", context.Cause(connCtx))
 	case <-ctx.Done():
-		return t, context.Cause(ctx)
+		return t, fmt.Errorf("request context timed out because %w", context.Cause(ctx))
 	case reqChan <- internal.ChanReq[T]{Ctx: ctx, RespChan: respChan}:
 	}
 
 	select {
 	case <-connCtx.Done():
-		return t, fmt.Errorf("rmq.Connection context finished: %w", context.Cause(connCtx))
+		return t, fmt.Errorf("rmq.Connection context timed out because %w", context.Cause(connCtx))
 	case <-ctx.Done():
-		return t, context.Cause(ctx)
+		return t, fmt.Errorf("request context timed out because %w", context.Cause(ctx))
 	case resp := <-respChan:
 		return resp.Val, resp.Err
 	}
@@ -165,12 +165,12 @@ func (c *Connection) CurrentConnection(ctx context.Context) (AMQPConnection, err
 	defer cancel()
 	conn, err := request(c.ctx, ctx, c.currentConReqChan)
 	if err != nil {
-		return conn, err
+		return nil, err
 	}
 	if conn.IsClosed() {
-		return conn, amqp.ErrClosed
+		return nil, amqp.ErrClosed
 	}
-	return conn, err
+	return conn, nil
 }
 
 func (c *Connection) redial(dialFn func() (AMQPConnection, error)) {
