@@ -16,10 +16,10 @@ type PublisherConfig struct {
 	// NotifyReturn will receive amqp.Return's from any amqp.Channel this rmq.Publisher sends on.
 	// Recommended to use a buffered channel. Closed after the publisher's context is done.
 	NotifyReturn chan<- amqp.Return
-	// LogReturns without their amqp.Return.Body using PublisherConfig.Log.
+	// LogReturns without their amqp.Return.Body using CommonConfig.Log when true
 	LogReturns bool
 
-	// DontConfirm will not set the amqp.Channel in Confirm mode, and disallow PublishUntilConfirmed.
+	// DontConfirm means the Publisher's amqp.Channel won't be in Confirm mode. Methods except for Publish will throw an error.
 	DontConfirm bool
 }
 
@@ -183,6 +183,10 @@ func (p *Publishing) publish(mqChan *amqp.Channel) {
 	p.req.RespChan <- resp
 }
 
+func (p *Publishing) empty() bool {
+	return p.Exchange == "" && p.RoutingKey == "" && len(p.Body) == 0
+}
+
 // Publish send a Publishing on rmq.Publisher's current amqp.Channel.
 // Returns amqp.DefferedConfirmation's only if the rmq.Publisher has Confirm set.
 // If an error is returned, rmq.Publisher will grab another amqp.Channel from rmq.Connection, which itself will redial AMQP if necessary.
@@ -209,9 +213,9 @@ func (p *Publisher) Publish(ctx context.Context, pub Publishing) (*amqp.Deferred
 }
 
 // PublishUntilConfirmed calls Publish and waits for Publishing to be confirmed.
-// It republishes if a message isn't confirmed after ConfirmTimeout, or if Publish returns an error.
+// It republishes if a message isn't confirmed after confirmTimeout, or if Publish returns an error.
 // Returns *amqp.DeferredConfirmation so the caller can check if it's Acked().
-// Recommended to call with context.WithTimeout.
+// confirmTimeout defaults to 1 minute. Recommended to call with context.WithTimeout.
 func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout time.Duration, pub Publishing) (*amqp.DeferredConfirmation, error) {
 	logPrefix := "rmq.Publisher.PublishUntilConfirmed"
 
@@ -225,15 +229,18 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 
 	var pubDelay time.Duration
 	attempt := 0
+	errs := make([]error, 0)
+
 	for {
 		defConf, err := p.Publish(ctx, pub)
 		if err != nil {
 			pubDelay = p.config.Delay(attempt)
 			attempt++
-			p.config.Log(ctx, slog.LevelError, logPrefix+" got a Publish error. Republishing due to %v", err)
+			errs = append(errs, err)
 			select {
 			case <-ctx.Done():
-				return defConf, fmt.Errorf(logPrefix+" context done before the publish was sent %w", context.Cause(ctx))
+				err = fmt.Errorf(logPrefix+" context done before the publish was sent %w", context.Cause(ctx))
+				return defConf, errors.Join(append(errs, err)...)
 			case <-time.After(pubDelay):
 				continue
 			}
@@ -245,10 +252,11 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 
 		select {
 		case <-confirmTimeout.C:
-			p.config.Log(ctx, slog.LevelWarn, logPrefix+" timed out waiting for confirm, republishing")
+			errs = append(errs, errors.New(logPrefix+" timed out waiting for confirm, republishing"))
 			continue
 		case <-ctx.Done():
-			return defConf, fmt.Errorf("rmq.Publisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
+			err = fmt.Errorf("rmq.Publisher.PublishUntilConfirmed context done before the publish was confirmed %w", context.Cause(ctx))
+			return defConf, errors.Join(append(errs, err)...)
 		case <-defConf.Done():
 			return defConf, nil
 		}
@@ -263,12 +271,16 @@ func (p *Publisher) PublishUntilConfirmed(ctx context.Context, confirmTimeout ti
 // RabbitMQ acks Publishing's so monitor the NotifyReturn chan to ensure your Publishing's are being delivered.
 //
 // PublishUntilAcked is intended for ensuring a Publishing with a known destination queue will get acked despite flaky connections or temporary RabbitMQ node failures.
+// Recommended to call with context.WithTimeout.
 func (p *Publisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.Duration, pub Publishing) error {
 	logPrefix := "rmq.Publisher.PublishUntilAcked"
 	nacks := 0
 	for {
 		defConf, err := p.PublishUntilConfirmed(ctx, confirmTimeout, pub)
 		if err != nil {
+			if nacks > 0 {
+				return fmt.Errorf(logPrefix+" resent nacked Publishings %d time(s) and %w", nacks, err)
+			}
 			return err
 		}
 
@@ -277,7 +289,126 @@ func (p *Publisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.D
 		}
 
 		nacks++
-		p.config.Log(ctx, slog.LevelWarn, logPrefix+" resending Publishing that has been nacked %d time(s)...", nacks)
-		// There isn't a delay here since PublishUntilConfirmed waiting for the confirm should effectively slow us down to what can be handled by the AMQP server.
 	}
+}
+
+// PublishBatchUntilAcked Publishes all of your Publishings at once, and then wait's for the DeferredConfirmation to be Acked,
+// resending if it's been longer than confirmTimeout or if they've been nacked.
+// confirmTimeout defaults to 1 minute. Recommended to call with context.WithTimeout.
+func (p *Publisher) PublishBatchUntilAcked(ctx context.Context, confirmTimeout time.Duration, pubs ...Publishing) error {
+	logPrefix := "rmq.Publisher.PublishBatchUntilConfirmed"
+
+	if len(pubs) == 0 {
+		return nil
+	}
+	if p.config.DontConfirm {
+		return fmt.Errorf(logPrefix + " called on a rmq.Publisher that's not in Confirm mode")
+	}
+
+	if confirmTimeout == 0 {
+		confirmTimeout = time.Minute
+	}
+
+	errs := make([]error, 0)
+	pendingPubs := make([]*amqp.DeferredConfirmation, len(pubs))
+	ackedPubs := make([]bool, len(pubs))
+
+	remainingPubs := func() int {
+		unacks := 0
+		for _, acked := range ackedPubs {
+			if !acked {
+				unacks++
+			}
+		}
+		return unacks
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			err := fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
+			return errors.Join(append(errs, err)...)
+		default:
+		}
+
+		err := p.publishBatch(ctx, confirmTimeout, remainingPubs(), pubs, pendingPubs, ackedPubs, errs)
+		if err == nil {
+			return nil
+		}
+		clear(pendingPubs)
+	}
+}
+
+// publishBatch publishes a slice of pubs once, waiting for them all to get acked.
+// republishes on failure, returns after they've confirmed.
+// blocks until context ends or confirmTimeout
+func (p *Publisher) publishBatch(
+	ctx context.Context,
+	confirmTimeout time.Duration,
+	remaining int,
+	pubs []Publishing,
+	pendingPubs []*amqp.DeferredConfirmation,
+	ackedPubs []bool,
+	errs []error,
+) (err error) {
+	logPrefix := "rmq.Publisher.publishBatch"
+	published := 0
+	attempt := 0
+	var delay time.Duration
+	for published != remaining {
+		for i, pub := range pubs {
+			// Skip if it's been successfully published or acked
+			if pendingPubs[i] != nil || ackedPubs[i] {
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
+			default:
+			}
+
+			pendingPubs[i], err = p.Publish(ctx, pub)
+			if err != nil {
+				errs = append(errs, err)
+				delay = p.config.Delay(attempt)
+				attempt++
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
+				case <-time.After(delay):
+				}
+			} else {
+				published++
+				attempt = 0
+			}
+		}
+	}
+
+	confirmTimer := time.After(confirmTimeout)
+	confirmed := 0
+	for confirmed != remaining {
+		for i, pub := range pendingPubs {
+			// Skip if it's already been confirmed
+			if pendingPubs[i] == nil {
+				continue
+			}
+
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
+			case <-confirmTimer:
+				return fmt.Errorf(logPrefix + " timed out waiting on confirms")
+			case <-pub.Done():
+				if pub.Acked() {
+					ackedPubs[i] = true
+				}
+				confirmed++
+				pendingPubs[i] = nil
+			default:
+			}
+		}
+	}
+
+	return nil
 }

@@ -16,7 +16,7 @@ type ConsumerConfig struct {
 	CommonConfig
 
 	Queue         Queue
-	QueueBindings []QueueBinding // Should only be used for anonymous queues, otherwise QueueBinding's be declared with DeclareTopology
+	QueueBindings []QueueBinding // Only needed for anonymous queues since Consumer's do not return the generated RabbitMQ queue name
 	Consume       Consume
 	Qos           Qos
 }
@@ -61,24 +61,25 @@ type Qos struct {
 // Consumer enables reliable AMQP Queue consumption.
 type Consumer struct {
 	config ConsumerConfig
+	conn   *Connection
 }
 
 // NewConsumer takes in a ConsumerConfig that describes the AMQP topology of a single queue,
 // and returns a rmq.Consumer that can redeclare this topology on any errors during queue consumption.
 // This enables robust reconnections even on unreliable networks.
-func NewConsumer(config ConsumerConfig) *Consumer {
+func NewConsumer(rmqConn *Connection, config ConsumerConfig) *Consumer {
 	config.setDefaults()
-	return &Consumer{config: config}
+	return &Consumer{config: config, conn: rmqConn}
 }
 
 // safeDeclareAndConsume safely declares and consumes from an amqp.Queue
 // Closes the amqp.Channel on errors.
-func (c *Consumer) safeDeclareAndConsume(ctx context.Context, rmqConn *Connection) (_ *amqp.Channel, _ <-chan amqp.Delivery, err error) {
+func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, _ <-chan amqp.Delivery, err error) {
 	logPrefix := fmt.Sprintf("rmq.Consumer.safeDeclareAndConsume for queue %s", c.config.Queue.Name)
 	ctx, cancel := context.WithTimeout(ctx, c.config.AMQPTimeout)
 	defer cancel()
 
-	mqChan, err := rmqConn.Channel(ctx)
+	mqChan, err := c.conn.Channel(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", err)
 	}
@@ -172,7 +173,7 @@ func (c *Consumer) declareAndConsume(ctx context.Context, mqChan *amqp.Channel) 
 // On errors Consume reconnects to AMQP, redeclares and resumes consumption and forwarding of deliveries.
 // Consume returns an unbuffered channel, and will block on sending to it if no ones listening.
 // The returned channel is closed only after the context finishes.
-func (c *Consumer) Consume(ctx context.Context, rmqConn *Connection) <-chan amqp.Delivery {
+func (c *Consumer) Consume(ctx context.Context) <-chan amqp.Delivery {
 	outChan := make(chan amqp.Delivery)
 	go func() {
 		logPrefix := fmt.Sprintf("rmq.Consumer.Consume for queue (%s)", c.config.Queue.Name)
@@ -185,7 +186,7 @@ func (c *Consumer) Consume(ctx context.Context, rmqConn *Connection) <-chan amqp
 				return
 			case <-time.After(delay):
 			}
-			mqChan, inChan, err := c.safeDeclareAndConsume(ctx, rmqConn)
+			mqChan, inChan, err := c.safeDeclareAndConsume(ctx)
 			if err != nil {
 				delay = c.config.Delay(attempt)
 				attempt++
@@ -202,7 +203,7 @@ func (c *Consumer) Consume(ctx context.Context, rmqConn *Connection) <-chan amqp
 	return outChan
 }
 
-// forwardDeliveries forwards from inChan until it closes. If the context finishes it closes the amqp Channel so that the delivery channel will close eventually.
+// forwardDeliveries forwards from inChan until it closes. If the context finishes it closes the amqp Channel so that the delivery channel will close after sending it's deliveries.
 func (c *Consumer) forwardDeliveries(ctx context.Context, mqChan *amqp.Channel, inChan <-chan amqp.Delivery, outChan chan<- amqp.Delivery) {
 	logPrefix := fmt.Sprintf("rmq.Consumer.forwardDeliveries for queue (%s)", c.config.Queue.Name)
 	closeNotifier := mqChan.NotifyClose(make(chan *amqp.Error, 6))
@@ -233,18 +234,18 @@ func (c *Consumer) forwardDeliveries(ctx context.Context, mqChan *amqp.Channel, 
 }
 
 // ConsumeConcurrently simply runs the provided deliveryProcessor on each delivery from Consume in a new goroutine.
-// maxGoroutines limits the amounts of goroutines spawned and defaults to 2000.
+// maxGoroutines limits the amounts of goroutines spawned and defaults to 500.
 // Qos.PrefetchCount can also limit goroutines spawned if deliveryProcessor properly Acks messages.
 // Blocks until the context is finished and the Consume channel closes.
-func (c *Consumer) ConsumeConcurrently(ctx context.Context, rmqConn *Connection, maxGoroutines uint64, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
+func (c *Consumer) ConsumeConcurrently(ctx context.Context, maxGoroutines uint64, deliveryProcessor func(ctx context.Context, msg amqp.Delivery)) {
 	if maxGoroutines == 0 {
-		maxGoroutines = 2000
+		maxGoroutines = 500
 	}
 	// We use a simple semaphore here and a new goroutine each time.
-	// It may be more efficient to use a goroutine pool, but a concerned caller can probably do it better themselves.
+	// It may be more efficient to use a goroutine pool for small amounts of work, but a concerned caller can probably do it better themselves.
 	semaphore := make(chan struct{}, maxGoroutines)
 	deliverAndReleaseSemaphore := func(msg amqp.Delivery) { deliveryProcessor(ctx, msg); <-semaphore }
-	for msg := range c.Consume(ctx, rmqConn) {
+	for msg := range c.Consume(ctx) {
 		semaphore <- struct{}{}
 		go deliverAndReleaseSemaphore(msg)
 	}

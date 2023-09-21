@@ -24,7 +24,8 @@ This package attempts to provide a wrapper of useful features on top of amqp091,
 Using an AMQP publisher to publish a message with at least once delivery.
 
 ```
-ctx := context.TODO()
+ctx, cancel := context.WithTimeout(context.TODO(), time.Minute)
+defer cancel()
 cfg := rmq.CommonConfig{Log: slog.Log}
 
 rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL_1"), os.Getenv("AMQP_URL_2"))
@@ -39,21 +40,21 @@ if err := rmqPub.PublishUntilAcked(ctx, time.Minute, msg); err != nil {
 }
 ```
 
-Using a reliable AMQP consumer that delivers messages through transient network failures while processing work concurrently with bounded goroutines.
+Using a reliable AMQP consumer that receives deliveries through transient network failures while processing work concurrently with bounded goroutines.
 
 ```
-ctx := context.TODO()
+ctx, := context.TODO()
 cfg := rmq.CommonConfig{Log: slog.Log}
 
-rmqConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL"))
+rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL"), amqp.Config{})
 
 consCfg := 	rmq.ConsumerConfig{
         CommonConfig: cfg,
 		Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
-		Qos: rmq.Qos{PrefetchCount: 100},
+		Qos: rmq.Qos{PrefetchCount: 1000},
 }
 
-rmq.NewConsumer(consCfg).ConsumeConcurrently(ctx, rmqConn, 50, func(ctx context.Context, msg amqp.Delivery) {
+rmq.NewConsumer(rmqConn, consCfg).ConsumeConcurrently(ctx, 100, func(ctx context.Context, msg amqp.Delivery) {
     process(msg)
     if err := msg.Ack(false); err != nil {
         handleErr(err)
@@ -74,7 +75,7 @@ Here is an example logrus wrapper. danlock/rmq only uses the predefined slog.Lev
     PublisherConfig{
         Log: func(ctx context.Context, level slog.Level, msg string, args ...any) {
             logruslevel, _ := logrus.ParseLevel(level.String())
-            logrus.StandardLogger().WithContext(ctx).Logf(logruslevel, msg, args...)
+            logrus.StandardLogger().WithContext(ctx).Logf(logruslevel, msg)
         }
     }
 ```

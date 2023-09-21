@@ -55,13 +55,13 @@ func Example() {
 		panic("couldn't get a channel")
 	}
 
-	rmqCons := rmq.NewConsumer(rmq.ConsumerConfig{
+	rmqCons := rmq.NewConsumer(subRMQConn, rmq.ConsumerConfig{
 		CommonConfig: commonCfg,
 		Queue:        topology.Queues[0],
 		Qos:          rmq.Qos{PrefetchCount: 10},
 	})
 	// Now we have a RabbitMQ queue with messages incoming on the deliveries channel, even if the network flakes.
-	deliveries := rmqCons.Consume(ctx, subRMQConn)
+	deliveries := rmqCons.Consume(ctx)
 
 	rmqPub := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{CommonConfig: commonCfg})
 	// Now we have an AMQP publisher that can sends messages with at least once delivery.

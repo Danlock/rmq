@@ -41,3 +41,7 @@ coverage-browser:
 update-readme-badge:
 	@go tool cover -func=$(COVERAGE_PATH) -o=$(COVERAGE_PATH).badge
 	@go run github.com/AlexBeauchemin/gobadge@v0.3.0 -filename=$(COVERAGE_PATH).badge
+
+# pkg.go.dev documentation is updated via go get
+update-proxy-cache:
+	@GOPROXY=https://proxy.golang.org go get github.com/danlock/rmq
