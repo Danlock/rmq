@@ -48,8 +48,8 @@ func BenchmarkPublishAndConsumeMany(b *testing.B) {
 		}},
 	}
 
-	subRMQConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
-	pubRMQConn := rmq.ConnectWithURL(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
+	subRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
+	pubRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
 
 	consumer := rmq.NewConsumer(subRMQConn, rmq.ConsumerConfig{
 		CommonConfig: baseCfg,
@@ -211,5 +211,4 @@ func BenchmarkPublishAndConsumeMany(b *testing.B) {
 			}
 		})
 	}
-
 }

@@ -13,16 +13,6 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// Topology contains all the exchange, queue and binding information needed for your application to use RabbitMQ.
-type Topology struct {
-	CommonConfig
-
-	Exchanges        []Exchange
-	ExchangeBindings []ExchangeBinding
-	Queues           []Queue
-	QueueBindings    []QueueBinding
-}
-
 // Exchange contains args for amqp.Channel.ExchangeDeclare
 type Exchange struct {
 	Name       string
@@ -47,7 +37,7 @@ type ExchangeBinding struct {
 // DeclareTopology declares an AMQP topology once.
 // If you want this to be redeclared automatically on connections, add your Topology to ConnectConfig instead.
 func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topology) error {
-	logPrefix := fmt.Sprintf("rmq.DeclareTopology")
+	logPrefix := fmt.Sprintf("rmq.DeclareTopology for AMQPConnection (%s -> %s)", amqpConn.LocalAddr(), amqpConn.RemoteAddr())
 
 	if topology.empty() {
 		return nil
@@ -96,6 +86,23 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 	case err := <-errChan:
 		return err
 	}
+}
+
+// ImportJSONTopology reads in a Topology from a file. Useful for setting Exchanges, ExchangeBindings, Queues and QueueBindings from a config,
+// although rabbitmqctl is probably a better candidate for this since it can also export your cuurrent RabbitMQ schema.
+// Decoding files to structs is easy in Golang, so feel free to write your own as desired for XML, YAML, TOML or any other desired config format.
+func ImportJSONTopology(topologyReader io.Reader) (top Topology, _ error) {
+	return top, json.NewDecoder(topologyReader).Decode(&top)
+}
+
+// Topology contains all the exchange, queue and binding information needed for your application to use RabbitMQ.
+type Topology struct {
+	CommonConfig
+
+	Exchanges        []Exchange
+	ExchangeBindings []ExchangeBinding
+	Queues           []Queue
+	QueueBindings    []QueueBinding
 }
 
 func (t *Topology) empty() bool {
@@ -161,11 +168,4 @@ func (t *Topology) declare(ctx context.Context, mqChan *amqp.Channel) (err error
 	}
 
 	return nil
-}
-
-// ImportJSONTopology reads in a Topology from a file. Useful for setting Exchanges, ExchangeBindings, Queues and QueueBindings from a config,
-// although rabbitmqctl is probably a better candidate for this since it can also export your cuurrent RabbitMQ schema.
-// Decoding files to structs is easy in Golang, so feel free to write your own as desired for XML, YAML, TOML or any other desired config format.
-func ImportJSONTopology(topologyReader io.Reader) (top Topology, _ error) {
-	return top, json.NewDecoder(topologyReader).Decode(&top)
 }

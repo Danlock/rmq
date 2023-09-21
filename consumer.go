@@ -176,7 +176,7 @@ func (c *Consumer) declareAndConsume(ctx context.Context, mqChan *amqp.Channel) 
 // Consume uses the rmq.Consumer config to declare and consume from an AMQP queue, forwarding deliveries to it's returned channel.
 // On errors Consume reconnects to AMQP, redeclares and resumes consumption and forwarding of deliveries.
 // Consume returns an unbuffered channel, and will block on sending to it if no ones listening.
-// The returned channel is closed only after the context finishes.
+// The returned channel is closed only after the context finishes and the amqp.Channel.Consume's Go channel delivers it's messages.
 func (c *Consumer) Consume(ctx context.Context) <-chan amqp.Delivery {
 	outChan := make(chan amqp.Delivery)
 	go func() {

@@ -27,12 +27,9 @@ type ConnectConfig struct {
 	CommonConfig
 	// Topology will be declared each connection to mitigate downed RabbitMQ nodes. Recommended to set, but not required.
 	Topology Topology
-}
-
-func ConnectWithURL(ctx context.Context, conf ConnectConfig, amqpURL string) *Connection {
-	return Connect(ctx, conf, func() (AMQPConnection, error) {
-		return amqp.Dial(amqpURL)
-	})
+	// DisableAMQP091Logs ensures the Connection's logs will not include rabbitmq/amqp091-go log's.
+	// Note only the first Connection created will include rabbitmq/amqp091-go logs, due to rabbitmq/amqp091-go using a single global logger.
+	DisableAMQP091Logs bool
 }
 
 func ConnectWithURLs(ctx context.Context, conf ConnectConfig, amqpURLs ...string) *Connection {
@@ -40,15 +37,15 @@ func ConnectWithURLs(ctx context.Context, conf ConnectConfig, amqpURLs ...string
 		panic("ConnectWithURLs needs amqpURLs!")
 	}
 	return Connect(ctx, conf, func() (AMQPConnection, error) {
-		var errs error
+		errs := make([]error, 0, len(amqpURLs))
 		for _, amqpURL := range amqpURLs {
 			amqpConn, err := amqp.Dial(amqpURL)
 			if err == nil {
 				return amqpConn, nil
 			}
-			errs = errors.Join(err)
+			errs = append(errs, err)
 		}
-		return nil, errs
+		return nil, errors.Join(errs...)
 	})
 }
 
@@ -68,8 +65,11 @@ func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnect
 	if dialFn == nil || ctx == nil {
 		panic("Connect requires a ctx and a dialFn")
 	}
-	// Thread safely set the amqp091 logger so it's included within danlock/rmq Connection Logs.
-	if conf.Log != nil {
+	// Thread safely set the amqp091 logger once so it's included within danlock/rmq Connection Logs.
+	// We use a sync.Once to avoid races, but this also means just the first Connection logs these errors.
+	// It could be useful to have every Connection log these but practically that would lead to unneccessary log spam.
+	// If this behaviour causes an issue your only solution is to set DisableAMQP091Logs and call amqp.SetLogger yourself
+	if conf.Log != nil && !conf.DisableAMQP091Logs {
 		setAMQP091Logger.Do(func() {
 			amqp.SetLogger(internal.AMQP091Logger{ctx, conf.Log})
 		})
@@ -191,6 +191,7 @@ func (c *Connection) redial(dialFn func() (AMQPConnection, error)) {
 			c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed, retrying after %s. err: %+v", dialDelay.String(), err)
 			continue
 		}
+		logPrefix = fmt.Sprintf("rmq.Connection.redial's AMQPConnection (%s -> %s)", amqpConn.LocalAddr(), amqpConn.RemoteAddr())
 
 		// Redeclare Topology if we have one. This has the bonus aspect of making sure the connection is actually usable, better than a Ping.
 		if err := DeclareTopology(c.ctx, amqpConn, c.config.Topology); err != nil {

@@ -31,8 +31,8 @@ func Example() {
 	// If we want to use a different log library instead of log/slog.Log, wrap the function instead.
 	// If call depth is being logged, add to it so it doesn't just print this log function.
 	// Here we use log instead of slog
-	customLog := func(ctx context.Context, level slog.Level, msg string, args ...any) {
-		log.Printf("[%s] trace_id=%v msg="+msg, append([]any{level, ctx.Value("your_embedded_trace_id")}, args...)...)
+	customLog := func(ctx context.Context, level slog.Level, msg string, _ ...any) {
+		log.Printf("[%s] trace_id=%v msg="+msg, level, ctx.Value("your_embedded_trace_id"))
 	}
 	commonCfg := rmq.CommonConfig{Log: customLog}
 	// Create an AMQP topology for our healthcheck, which uses a temporary exchange.
@@ -46,8 +46,8 @@ func Example() {
 	// danlock/rmq best practice is including your applications topology in your ConnectConfig
 	cfg := rmq.ConnectConfig{CommonConfig: commonCfg, Topology: topology}
 	// RabbitMQ best practice is to pub and sub on different AMQP connections to avoid TCP backpressure causing issues with message consumption.
-	pubRMQConn := rmq.ConnectWithURL(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
-	subRMQConn := rmq.ConnectWithURL(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
+	pubRMQConn := rmq.ConnectWithURLs(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
+	subRMQConn := rmq.ConnectWithURLs(ctx, cfg, os.Getenv("TEST_AMQP_URI"))
 
 	// A rudimentary healthcheck of a rmq.Connection is to ensure it can get a Channel, but we can do better
 	_, err := subRMQConn.MustChannel(ctx)

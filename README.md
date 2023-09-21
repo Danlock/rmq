@@ -7,7 +7,7 @@ An AMQP library for Go, built on top of amqp091.
 
 [streadway/amqp](https://github.com/streadway/amqp), the library the RabbitMQ maintainers forked to [amqp-091](https://github.com/rabbitmq/amqp091-go), is a stable, thin client for communicating to RabbitMQ, but lacks many of the features present in RabbitMQ libraries from other languages. Many redialable AMQP connections have been reinvented in Go codebases everywhere.
 
-This package attempts to provide a wrapper of useful features on top of amqp091, in the hopes of preventing at least one more unnecessary reinvention.
+This package attempts to provide a wrapper of useful features on top of amqp091, in the hopes of preventing at least one more unnecessary reinvention (other than itself!)
 
 # Design Goals
 
@@ -15,7 +15,7 @@ This package attempts to provide a wrapper of useful features on top of amqp091,
 
 - Network aware message delivery. Infra can fail so danlock/rmq uses context.Context and default timeouts wherever possible.
 
-- As few dependencies as possible.
+- One dependency (rabbitmq/amqp091-go).
 
 - Prioritize readability. This means no functions with 5 boolean args.
 
@@ -72,8 +72,8 @@ All classes accept a Log function pointer that can be ignored entirely, set easi
 
 Here is an example logrus wrapper. danlock/rmq only uses the predefined slog.Level's, and doesn't send any args.
 ```
-    PublisherConfig{
-        Log: func(ctx context.Context, level slog.Level, msg string, args ...any) {
+    CommonConfig{
+        Log: func(ctx context.Context, level slog.Level, msg string, _ ...any) {
             logruslevel, _ := logrus.ParseLevel(level.String())
             logrus.StandardLogger().WithContext(ctx).Logf(logruslevel, msg)
         }
