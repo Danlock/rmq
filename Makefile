@@ -24,6 +24,9 @@ unit-test:
 test:
 	@TEST_AMQP_URI=$(TEST_AMQP_URI) go test -v -race -count=2 -tags="rabbit" ./...
 
+bench:
+	@TEST_AMQP_URI=$(TEST_AMQP_URI) go test -benchmem -run=^$ -v -count=2 -tags="rabbit" -bench .  ./...
+
 coverage:
 	@TEST_AMQP_URI=$(TEST_AMQP_URI) go test -covermode=count -tags="rabbit" -coverprofile=$(COVERAGE_PATH)
 

@@ -61,6 +61,8 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 	// Call them in a goroutine so we can bail if necessary
 	start := time.Now()
 	errChan := make(chan error, 1)
+	shouldLog := make(chan struct{})
+
 	go func() {
 		mqChan, err := amqpConn.Channel()
 		if err != nil {
@@ -74,7 +76,13 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 		if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
 			err = errors.Join(err, mqChanErr)
 		}
-		errChan <- err
+
+		select {
+		case <-shouldLog:
+			topology.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), err)
+		default:
+			errChan <- err
+		}
 	}()
 
 	select {
@@ -82,9 +90,7 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 		// Log our leaked goroutine's response whenever it finally finishes since it may have useful debugging information.
 		if topology.Log != nil {
 			internal.WrapLogFunc(&topology.Log)
-			go func() {
-				topology.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), <-errChan)
-			}()
+			close(shouldLog)
 		}
 		return fmt.Errorf(logPrefix+" unable to complete before context due to %w", context.Cause(ctx))
 	case err := <-errChan:

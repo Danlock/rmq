@@ -87,6 +87,7 @@ func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, 
 	// Call them in a goroutine so we can timeout if necessary
 
 	respChan := make(chan internal.ChanResp[<-chan amqp.Delivery], 1)
+	shouldLog := make(chan struct{})
 	start := time.Now()
 	go func() {
 		var r internal.ChanResp[<-chan amqp.Delivery]
@@ -97,16 +98,19 @@ func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, 
 				r.Err = errors.Join(r.Err, mqChanErr)
 			}
 		}
-		respChan <- r
+
+		select {
+		case <-shouldLog:
+			c.config.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.Err)
+		default:
+			respChan <- r
+		}
 	}()
 
 	select {
 	case <-ctx.Done():
-		go func() {
-			// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
-			r := <-respChan
-			c.config.Log(ctx, slog.LevelWarn, logPrefix+" completed after it's context finished. It took %s. Err: %+v", time.Since(start), r.Err)
-		}()
+		// Log our leaked goroutine's response whenever it finally finishes in case it has useful information.
+		close(shouldLog)
 		return nil, nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", context.Cause(ctx))
 	case r := <-respChan:
 		return mqChan, r.Val, r.Err

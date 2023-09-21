@@ -183,10 +183,6 @@ func (p *Publishing) publish(mqChan *amqp.Channel) {
 	p.req.RespChan <- resp
 }
 
-func (p *Publishing) empty() bool {
-	return p.Exchange == "" && p.RoutingKey == "" && len(p.Body) == 0
-}
-
 // Publish send a Publishing on rmq.Publisher's current amqp.Channel.
 // Returns amqp.DefferedConfirmation's only if the rmq.Publisher has Confirm set.
 // If an error is returned, rmq.Publisher will grab another amqp.Channel from rmq.Connection, which itself will redial AMQP if necessary.
