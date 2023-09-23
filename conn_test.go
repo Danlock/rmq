@@ -48,13 +48,13 @@ func TestConnect(t *testing.T) {
 		defer func() {
 			errs <- recover()
 		}()
-		_ = Connect(nil, ConnectConfig{}, nil)
+		_ = Connect(nil, ConnectArgs{}, nil)
 	}()
 	result := <-errs
 	if result == nil {
 		t.Fatalf("Connect should panic when missing required arguments")
 	}
-	rmqConn := Connect(context.Background(), ConnectConfig{}, func() (AMQPConnection, error) { return nil, fmt.Errorf("sike") })
+	rmqConn := Connect(context.Background(), ConnectArgs{}, func() (AMQPConnection, error) { return nil, fmt.Errorf("sike") })
 	if rmqConn == nil {
 		t.Fatalf("Connect failed to return a rmq.Connection")
 	}
@@ -90,7 +90,7 @@ func TestConnection_CurrentConnection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rmqConn := Connect(tt.connCtx, ConnectConfig{}, tt.connDialFn)
+			rmqConn := Connect(tt.connCtx, ConnectArgs{}, tt.connDialFn)
 			got, err := rmqConn.CurrentConnection(tt.reqCtx)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("rmq.Connection.CurrentConnection() error = %v, wantErr %v", err, tt.wantErr)
@@ -120,9 +120,9 @@ func TestConnection_Channel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	baseCfg := CommonConfig{Log: slog.Log}
-	connConf := ConnectConfig{
-		CommonConfig: baseCfg,
+	baseCfg := Args{Log: slog.Log}
+	connConf := ConnectArgs{
+		Args: baseCfg,
 	}
 	goodRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return goodMockAMQP, nil
@@ -133,7 +133,7 @@ func TestConnection_Channel(t *testing.T) {
 	slowRMQConn := Connect(ctx, connConf, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
-	slowConfig := ConnectConfig{CommonConfig: CommonConfig{Log: slog.Log, AMQPTimeout: 50 * time.Millisecond}}
+	slowConfig := ConnectArgs{Args: Args{Log: slog.Log, AMQPTimeout: 50 * time.Millisecond}}
 	slowUsingTimeoutRMQConn := Connect(ctx, slowConfig, func() (AMQPConnection, error) {
 		return slowMockAMQP, nil
 	})
@@ -180,8 +180,8 @@ func TestConnection_Channel(t *testing.T) {
 		})
 	}
 
-	connConf = ConnectConfig{
-		CommonConfig: CommonConfig{
+	connConf = ConnectArgs{
+		Args: Args{
 			Log:   connConf.Log,
 			Delay: func(attempt int) time.Duration { return time.Duration(attempt) * time.Millisecond },
 		},

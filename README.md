@@ -1,5 +1,5 @@
 # rmq
-![Coverage](https://img.shields.io/badge/Coverage-86.1%25-brightgreen)
+![Coverage](https://img.shields.io/badge/Coverage-85.6%25-brightgreen)
 [![Go Report Card](https://goreportcard.com/badge/github.com/danlock/rmq)](https://goreportcard.com/report/github.com/danlock/rmq)
 [![Go Reference](https://pkg.go.dev/badge/github.com/danlock/rmq.svg)](https://pkg.go.dev/github.com/danlock/rmq)
 
@@ -26,11 +26,11 @@ Using an AMQP publisher to publish a message with at least once delivery.
 ```
 ctx, cancel := context.WithTimeout(context.TODO(), time.Minute)
 defer cancel()
-cfg := rmq.CommonConfig{Log: slog.Log}
+cfg := rmq.Args{Log: slog.Log}
 
-rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL_1"), os.Getenv("AMQP_URL_2"))
+rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectArgs{Args: cfg}, os.Getenv("AMQP_URL_1"), os.Getenv("AMQP_URL_2"))
 
-rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{CommonConfig: cfg})
+rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherArgs{Args: cfg})
 
 msg := rmq.Publishing{Exchange: "amq.topic", RoutingKey: "somewhere", Mandatory: true}
 msg.Body = []byte(`{"life": 42}`)
@@ -44,12 +44,12 @@ Using a reliable AMQP consumer that receives deliveries through transient networ
 
 ```
 ctx, := context.TODO()
-cfg := rmq.CommonConfig{Log: slog.Log}
+cfg := rmq.Args{Log: slog.Log}
 
-rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{CommonConfig: cfg}, os.Getenv("AMQP_URL"), amqp.Config{})
+rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectArgs{Args: cfg}, os.Getenv("AMQP_URL"), amqp.Config{})
 
-consCfg := 	rmq.ConsumerConfig{
-        CommonConfig: cfg,
+consCfg := 	rmq.ConsumerArgs{
+        Args: cfg,
 		Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
 		Qos: rmq.Qos{PrefetchCount: 1000},
 }
@@ -72,7 +72,7 @@ All classes accept a Log function pointer that can be ignored entirely, set easi
 
 Here is an example logrus wrapper. danlock/rmq only uses the predefined slog.Level's, and doesn't send any args.
 ```
-    CommonConfig{
+    Args{
         Log: func(ctx context.Context, level slog.Level, msg string, _ ...any) {
             logruslevel, _ := logrus.ParseLevel(level.String())
             logrus.StandardLogger().WithContext(ctx).Logf(logruslevel, msg)

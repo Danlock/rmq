@@ -9,14 +9,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/danlock/rmq/internal"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 // Exchange contains args for amqp.Channel.ExchangeDeclare
 type Exchange struct {
 	Name       string
-	Kind       string
+	Kind       string // Kind is required by ExchangeDeclare. amqp091-go exports valid values like amqp.ExchangeDirect, etc
 	Durable    bool
 	AutoDelete bool
 	Internal   bool
@@ -35,14 +34,14 @@ type ExchangeBinding struct {
 }
 
 // DeclareTopology declares an AMQP topology once.
-// If you want this to be redeclared automatically on connections, add your Topology to ConnectConfig instead.
+// If you want this to be redeclared automatically on connections, add your Topology to ConnectArgs instead.
 func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topology) error {
 	logPrefix := fmt.Sprintf("rmq.DeclareTopology for AMQPConnection (%s -> %s)", amqpConn.LocalAddr(), amqpConn.RemoteAddr())
 
 	if topology.empty() {
 		return nil
 	}
-
+	dontLog := topology.Log == nil
 	topology.setDefaults()
 	ctx, cancel := context.WithTimeout(ctx, topology.AMQPTimeout)
 	defer cancel()
@@ -62,7 +61,8 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 		err = topology.declare(ctx, mqChan)
 		// An amqp.Channel must not be used from multiple goroutines simultaneously, so close it inside this goroutine to prevent cryptic RabbitMQ errors.
 		mqChanErr := mqChan.Close()
-		// Should we join mqChanErr if err is nil? When declare succeeeds a Close error is fairly inconsequential. Maybe just log it in that case? Food for thought.
+		// Should we join mqChanErr if err is nil? When declare succeeeds a Close error is fairly inconsequential. Unless it leaves the channel in a bad state...
+		// But we don't actually use the channel after this. Maybe just log it in that case? Food for thought.
 		if mqChanErr != nil && !errors.Is(mqChanErr, amqp.ErrClosed) {
 			err = errors.Join(err, mqChanErr)
 		}
@@ -78,8 +78,7 @@ func DeclareTopology(ctx context.Context, amqpConn AMQPConnection, topology Topo
 	select {
 	case <-ctx.Done():
 		// Log our leaked goroutine's response whenever it finally finishes since it may have useful debugging information.
-		if topology.Log != nil {
-			internal.WrapLogFunc(&topology.Log)
+		if !dontLog {
 			close(shouldLog)
 		}
 		return fmt.Errorf(logPrefix+" unable to complete before context due to %w", context.Cause(ctx))
@@ -97,7 +96,7 @@ func ImportJSONTopology(topologyReader io.Reader) (top Topology, _ error) {
 
 // Topology contains all the exchange, queue and binding information needed for your application to use RabbitMQ.
 type Topology struct {
-	CommonConfig
+	Args
 
 	Exchanges        []Exchange
 	ExchangeBindings []ExchangeBinding
@@ -160,8 +159,7 @@ func (t *Topology) declare(ctx context.Context, mqChan *amqp.Channel) (err error
 	for _, b := range t.QueueBindings {
 		err = mqChan.QueueBind(b.QueueName, b.RoutingKey, b.ExchangeName, b.NoWait, b.Args)
 		if err != nil {
-			err = fmt.Errorf(logPrefix+" unable to bind queue to exchange '%s' via key '%s' due to %w", b.ExchangeName, b.RoutingKey, err)
-			return
+			return fmt.Errorf(logPrefix+" unable to bind queue to exchange '%s' via key '%s' due to %w", b.ExchangeName, b.RoutingKey, err)
 		} else if err = context.Cause(ctx); err != nil {
 			return fmt.Errorf(logPrefix+" failed to declare queue bindings before context ended due to %w", err)
 		}

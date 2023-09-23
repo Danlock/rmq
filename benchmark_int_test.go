@@ -37,9 +37,9 @@ func BenchmarkPublishAndConsumeMany(b *testing.B) {
 	randSuffix := fmt.Sprintf("%d.%p", time.Now().UnixNano(), b)
 
 	queueName := "BenchmarkPublishAndConsumeMany" + randSuffix
-	baseCfg := rmq.CommonConfig{Log: slog.Log}
+	baseCfg := rmq.Args{Log: slog.Log}
 	topology := rmq.Topology{
-		CommonConfig: baseCfg,
+		Args: baseCfg,
 		Queues: []rmq.Queue{{
 			Name: queueName,
 			Args: amqp.Table{
@@ -48,32 +48,32 @@ func BenchmarkPublishAndConsumeMany(b *testing.B) {
 		}},
 	}
 
-	subRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
-	pubRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectConfig{CommonConfig: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
+	subRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectArgs{Args: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
+	pubRMQConn := rmq.ConnectWithURLs(ctx, rmq.ConnectArgs{Args: baseCfg, Topology: topology}, os.Getenv("TEST_AMQP_URI"))
 
-	consumer := rmq.NewConsumer(subRMQConn, rmq.ConsumerConfig{
-		CommonConfig: baseCfg,
-		Queue:        topology.Queues[0],
+	consumer := rmq.NewConsumer(subRMQConn, rmq.ConsumerArgs{
+		Args:  baseCfg,
+		Queue: topology.Queues[0],
 	})
 
-	publisher := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{
-		CommonConfig: baseCfg,
-		LogReturns:   true,
+	publisher := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherArgs{
+		Args:       baseCfg,
+		LogReturns: true,
 	})
 
-	publisher2, publisher3 := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{
-		CommonConfig: baseCfg,
-		LogReturns:   true,
-	}), rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherConfig{
-		CommonConfig: baseCfg,
-		LogReturns:   true,
+	publisher2, publisher3 := rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherArgs{
+		Args:       baseCfg,
+		LogReturns: true,
+	}), rmq.NewPublisher(ctx, pubRMQConn, rmq.PublisherArgs{
+		Args:       baseCfg,
+		LogReturns: true,
 	})
 
 	dot := []byte(".")
 	errChan := make(chan error)
 	consumeChan := consumer.Consume(ctx)
 
-	publishings := generatePublishings(10000, queueName)
+	publishings := generatePublishings(10_000, queueName)
 
 	cases := []struct {
 		name        string

@@ -8,8 +8,8 @@ import (
 	"github.com/danlock/rmq/internal"
 )
 
-// CommonConfig contains options shared by danlock/rmq classes.
-type CommonConfig struct {
+// Args contains common options shared by danlock/rmq classes.
+type Args struct {
 	// AMQPTimeout sets a timeout on AMQP operations. Defaults to 1 minute.
 	AMQPTimeout time.Duration
 	// Delay returns the delay between retry attempts. Defaults to FibonacciDelay.
@@ -18,7 +18,7 @@ type CommonConfig struct {
 	Log func(ctx context.Context, level slog.Level, msg string, args ...any)
 }
 
-func (cfg *CommonConfig) setDefaults() {
+func (cfg *Args) setDefaults() {
 	if cfg.AMQPTimeout == 0 {
 		cfg.AMQPTimeout = time.Minute
 	}

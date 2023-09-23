@@ -11,12 +11,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-// ConsumerConfig contains information needed to declare and consume deliveries from a queue.
-type ConsumerConfig struct {
-	CommonConfig
+// ConsumerArgs contains information needed to declare and consume deliveries from a queue.
+type ConsumerArgs struct {
+	Args
 
 	Queue         Queue
-	QueueBindings []QueueBinding // Only needed for anonymous queues since Consumer's do not return the generated RabbitMQ queue name
+	QueueBindings []QueueBinding
 	Consume       Consume
 	Qos           Qos
 }
@@ -60,14 +60,14 @@ type Qos struct {
 
 // Consumer enables reliable AMQP Queue consumption.
 type Consumer struct {
-	config ConsumerConfig
+	config ConsumerArgs
 	conn   *Connection
 }
 
-// NewConsumer takes in a ConsumerConfig that describes the AMQP topology of a single queue,
+// NewConsumer takes in a ConsumerArgs that describes the AMQP topology of a single queue,
 // and returns a rmq.Consumer that can redeclare this topology on any errors during queue consumption.
 // This enables robust reconnections even on unreliable networks.
-func NewConsumer(rmqConn *Connection, config ConsumerConfig) *Consumer {
+func NewConsumer(rmqConn *Connection, config ConsumerArgs) *Consumer {
 	config.setDefaults()
 	return &Consumer{config: config, conn: rmqConn}
 }

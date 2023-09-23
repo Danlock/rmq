@@ -23,8 +23,8 @@ type AMQPConnection interface {
 	IsClosed() bool
 }
 
-type ConnectConfig struct {
-	CommonConfig
+type ConnectArgs struct {
+	Args
 	// Topology will be declared each connection to mitigate downed RabbitMQ nodes. Recommended to set, but not required.
 	Topology Topology
 	// DisableAMQP091Logs ensures the Connection's logs will not include rabbitmq/amqp091-go log's.
@@ -32,7 +32,7 @@ type ConnectConfig struct {
 	DisableAMQP091Logs bool
 }
 
-func ConnectWithURLs(ctx context.Context, conf ConnectConfig, amqpURLs ...string) *Connection {
+func ConnectWithURLs(ctx context.Context, conf ConnectArgs, amqpURLs ...string) *Connection {
 	if len(amqpURLs) == 0 {
 		panic("ConnectWithURLs needs amqpURLs!")
 	}
@@ -49,7 +49,7 @@ func ConnectWithURLs(ctx context.Context, conf ConnectConfig, amqpURLs ...string
 	})
 }
 
-func ConnectWithAMQPConfig(ctx context.Context, conf ConnectConfig, amqpURL string, amqpConf amqp.Config) *Connection {
+func ConnectWithAMQPConfig(ctx context.Context, conf ConnectArgs, amqpURL string, amqpConf amqp.Config) *Connection {
 	return Connect(ctx, conf, func() (AMQPConnection, error) {
 		return amqp.DialConfig(amqpURL, amqpConf)
 	})
@@ -61,7 +61,7 @@ var setAMQP091Logger sync.Once
 // Each Channel() call triggers rmq.Connection to return an amqp.Channel from it's CurrentConnection() or redial with the provided dialFn for a new AMQP Connection.
 // ConnectWith* functions provide a few simple dialFn's for ease of use. They can be a simple wrapper around an amqp.Dial or much more complicated.
 // If you want to ensure the Connection is working, call MustChannel with a timeout.
-func Connect(ctx context.Context, conf ConnectConfig, dialFn func() (AMQPConnection, error)) *Connection {
+func Connect(ctx context.Context, conf ConnectArgs, dialFn func() (AMQPConnection, error)) *Connection {
 	if dialFn == nil || ctx == nil {
 		panic("Connect requires a ctx and a dialFn")
 	}
@@ -119,7 +119,7 @@ type Connection struct {
 	chanReqChan       chan internal.ChanReq[*amqp.Channel]
 	currentConReqChan chan internal.ChanReq[AMQPConnection]
 
-	config ConnectConfig
+	config ConnectArgs
 }
 
 // Channel requests an AMQP channel from the current AMQP Connection.

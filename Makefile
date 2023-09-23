@@ -1,8 +1,9 @@
 #! /usr/bin/make
+SHELL = /bin/bash
 BUILDTIME = $(shell date -u --rfc-3339=seconds)
 GITHASH = $(shell git describe --dirty --always --tags)
 GITCOMMITNO = $(shell git rev-list --all --count)
-SHORTBUILDTAG = $(GITCOMMITNO).$(GITHASH)
+SHORTBUILDTAG = v0.0.$(GITCOMMITNO)-$(GITHASH)
 BUILDINFO = Build Time:$(BUILDTIME)
 LDFLAGS = -X 'main.buildTag=$(SHORTBUILDTAG)' -X 'main.buildInfo=$(BUILDINFO)'
 
@@ -48,3 +49,14 @@ update-readme-badge:
 # pkg.go.dev documentation is updated via go get
 update-proxy-cache:
 	@GOPROXY=https://proxy.golang.org go get github.com/danlock/rmq
+
+release:
+ifeq ($(findstring dirty,$(SHORTBUILDTAG)),dirty)
+	@echo "Version $(SHORTBUILDTAG) is filthy, commit to clean it" && exit 1
+endif
+	@read -t 5 -p "$(SHORTBUILDTAG) will be the new released version. Hit enter to proceed, CTRL-C to cancel."
+	@$(MAKE) deps
+	@$(MAKE) test
+	@$(MAKE) bench
+	@git tag $(SHORTBUILDTAG)
+	@git push origin $(SHORTBUILDTAG)

@@ -18,18 +18,18 @@ func TestPublisher(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	baseCfg := rmq.CommonConfig{Log: slog.Log}
-	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectConfig{CommonConfig: baseCfg}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
+	baseCfg := rmq.Args{Log: slog.Log}
+	rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectArgs{Args: baseCfg}, os.Getenv("TEST_AMQP_URI"), amqp.Config{})
 
-	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{DontConfirm: true})
+	unreliableRMQPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherArgs{DontConfirm: true})
 	_, err := unreliableRMQPub.PublishUntilConfirmed(ctx, time.Minute, rmq.Publishing{})
 	if err == nil {
 		t.Fatalf("PublishUntilConfirmed succeeded despite the publisher set dont confirm")
 	}
 
 	returnChan := make(chan amqp.Return, 5)
-	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherConfig{
-		CommonConfig: baseCfg,
+	rmqPub := rmq.NewPublisher(ctx, rmqConn, rmq.PublisherArgs{
+		Args:         baseCfg,
 		NotifyReturn: returnChan,
 		LogReturns:   true,
 	})

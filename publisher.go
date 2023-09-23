@@ -11,12 +11,12 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type PublisherConfig struct {
-	CommonConfig
+type PublisherArgs struct {
+	Args
 	// NotifyReturn will receive amqp.Return's from any amqp.Channel this rmq.Publisher sends on.
 	// Recommended to use a buffered channel. Closed after the publisher's context is done.
 	NotifyReturn chan<- amqp.Return
-	// LogReturns without their amqp.Return.Body using CommonConfig.Log when true
+	// LogReturns without their amqp.Return.Body using Args.Log when true
 	LogReturns bool
 
 	// DontConfirm means the Publisher's amqp.Channel won't be in Confirm mode. Methods except for Publish will throw an error.
@@ -25,13 +25,13 @@ type PublisherConfig struct {
 
 type Publisher struct {
 	ctx    context.Context
-	config PublisherConfig
+	config PublisherArgs
 	in     chan *Publishing
 }
 
 // NewPublisher creates a rmq.Publisher that will publish messages to AMQP on a single amqp.Channel at a time.
 // On error it reconnects via rmq.Connection. Shuts down when it's context is finished.
-func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherConfig) *Publisher {
+func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherArgs) *Publisher {
 	if ctx == nil || rmqConn == nil {
 		panic("rmq.NewPublisher called with nil ctx or rmqConn")
 	}
@@ -309,25 +309,18 @@ func (p *Publisher) PublishBatchUntilAcked(ctx context.Context, confirmTimeout t
 	pendingPubs := make([]*amqp.DeferredConfirmation, len(pubs))
 	ackedPubs := make([]bool, len(pubs))
 
-	remainingPubs := func() int {
-		unacks := 0
-		for _, acked := range ackedPubs {
-			if !acked {
-				unacks++
-			}
-		}
-		return unacks
-	}
-
 	for {
 		select {
+		case <-p.ctx.Done():
+			err := fmt.Errorf(logPrefix+"'s Publisher timed out because %w", context.Cause(p.ctx))
+			return errors.Join(append(errs, err)...)
 		case <-ctx.Done():
 			err := fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
 			return errors.Join(append(errs, err)...)
 		default:
 		}
 
-		err := p.publishBatch(ctx, confirmTimeout, remainingPubs(), pubs, pendingPubs, ackedPubs, errs)
+		err := p.publishBatch(ctx, confirmTimeout, pubs, pendingPubs, ackedPubs, errs)
 		if err == nil {
 			return nil
 		}
@@ -341,27 +334,27 @@ func (p *Publisher) PublishBatchUntilAcked(ctx context.Context, confirmTimeout t
 func (p *Publisher) publishBatch(
 	ctx context.Context,
 	confirmTimeout time.Duration,
-	remaining int,
 	pubs []Publishing,
 	pendingPubs []*amqp.DeferredConfirmation,
 	ackedPubs []bool,
 	errs []error,
 ) (err error) {
 	logPrefix := "rmq.Publisher.publishBatch"
-	published := 0
-	attempt := 0
 	var delay time.Duration
+	attempt := 0
+	published := 0
+	remaining := 0
+	for _, acked := range ackedPubs {
+		if !acked {
+			remaining++
+		}
+	}
+
 	for published != remaining {
 		for i, pub := range pubs {
-			// Skip if it's been successfully published or acked
-			if pendingPubs[i] != nil || ackedPubs[i] {
+			// Skip if it's been previously acked or published
+			if ackedPubs[i] || pendingPubs[i] != nil {
 				continue
-			}
-
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
-			default:
 			}
 
 			pendingPubs[i], err = p.Publish(ctx, pub)
@@ -370,6 +363,8 @@ func (p *Publisher) publishBatch(
 				delay = p.config.Delay(attempt)
 				attempt++
 				select {
+				case <-p.ctx.Done():
+					return fmt.Errorf(logPrefix+"'s Publisher timed out because %w", context.Cause(p.ctx))
 				case <-ctx.Done():
 					return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
 				case <-time.After(delay):
@@ -385,12 +380,14 @@ func (p *Publisher) publishBatch(
 	confirmed := 0
 	for confirmed != remaining {
 		for i, pub := range pendingPubs {
-			// Skip if it's already been confirmed
-			if pendingPubs[i] == nil {
+			// Skip if it's been previously confirmed
+			if ackedPubs[i] || pendingPubs[i] == nil {
 				continue
 			}
 
 			select {
+			case <-p.ctx.Done():
+				return fmt.Errorf(logPrefix+"'s Publisher timed out because %w", context.Cause(p.ctx))
 			case <-ctx.Done():
 				return fmt.Errorf(logPrefix+" timed out because %w", context.Cause(ctx))
 			case <-confirmTimer:
