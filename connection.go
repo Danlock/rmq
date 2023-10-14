@@ -174,38 +174,23 @@ func (c *Connection) CurrentConnection(ctx context.Context) (AMQPConnection, err
 }
 
 func (c *Connection) redial(dialFn func() (AMQPConnection, error)) {
-	logPrefix := "rmq.Connection.redial"
-	var dialDelay time.Duration
-	attempt := 0
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-time.After(dialDelay):
-		}
-
+	internal.Retry(c.ctx, c.config.Delay, func(delay time.Duration) (time.Duration, bool) {
+		logPrefix := "rmq.Connection.redial"
 		amqpConn, err := dialFn()
 		if err != nil {
-			dialDelay = c.config.Delay(attempt)
-			attempt++
-			c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed, retrying after %s. err: %+v", dialDelay.String(), err)
-			continue
+			c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed, retrying after %s due to %+v", delay.String(), err)
+			return 0, false
 		}
 		logPrefix = fmt.Sprintf("rmq.Connection.redial's AMQPConnection (%s -> %s)", amqpConn.LocalAddr(), amqpConn.RemoteAddr())
-
 		// Redeclare Topology if we have one. This has the bonus aspect of making sure the connection is actually usable, better than a Ping.
 		if err := DeclareTopology(c.ctx, amqpConn, c.config.Topology); err != nil {
-			dialDelay = c.config.Delay(attempt)
-			attempt++
-			c.config.Log(c.ctx, slog.LevelError, logPrefix+" DeclareTopology failed, retrying after %s. err: %+v", dialDelay.String(), err)
-			continue
+			c.config.Log(c.ctx, slog.LevelError, logPrefix+" DeclareTopology failed, retrying after %s due to %+v", delay.String(), err)
+			return 0, false
 		}
-
-		// After a successful dial and topology declare, reset our attempts and delay
-		dialDelay, attempt = 0, 0
-
+		start := time.Now()
 		c.listen(amqpConn)
-	}
+		return time.Since(start), true
+	})
 }
 
 // listen listens and responds to Channel and Connection requests. It returns on any failure to prompt another redial.
@@ -231,7 +216,7 @@ func (c *Connection) listen(amqpConn AMQPConnection) {
 			resp.Val, resp.Err = c.safeChannel(chanReq.Ctx, amqpConn)
 			chanReq.RespChan <- resp
 			if resp.Err != nil {
-				// redial on failed Channel requests
+				c.config.Log(c.ctx, slog.LevelDebug, logPrefix+" redialing due to %+v", resp.Err)
 				return
 			}
 		}

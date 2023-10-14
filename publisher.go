@@ -49,36 +49,25 @@ func NewPublisher(ctx context.Context, rmqConn *Connection, config PublisherArgs
 
 // connect grabs an amqp.Channel from rmq.Connection. It does so repeatedly on any error until it's context finishes.
 func (p *Publisher) connect(rmqConn *Connection) {
-	logPrefix := "rmq.Publisher.connect"
-	var delay time.Duration
-	attempt := 0
-	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case <-time.After(delay):
-		}
+	internal.Retry(p.ctx, p.config.Delay, func(delay time.Duration) (time.Duration, bool) {
+		logPrefix := "rmq.Publisher.connect"
 		mqChan, err := rmqConn.Channel(p.ctx)
 		if err != nil {
-			delay = p.config.Delay(attempt)
-			attempt++
-			p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to get amqp.Channel. Retrying in %s due to err %+v", delay.String(), err)
-			continue
+			p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to get amqp.Channel, retrying in %s due to %+v", delay.String(), err)
+			return 0, false
 		}
 		if !p.config.DontConfirm {
 			if err := mqChan.Confirm(false); err != nil {
-				delay = p.config.Delay(attempt)
-				attempt++
-				p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to put amqp.Channel in confirm mode. Retrying in %s due to err %+v", delay.String(), err)
-				continue
+				p.config.Log(p.ctx, slog.LevelError, logPrefix+" failed to put amqp.Channel in confirm mode, retrying in %s due to %+v", delay.String(), err)
+				return 0, false
 			}
 		}
 
-		// Successfully got a channel for publishing, reset delay
-		delay, attempt = 0, 0
+		start := time.Now()
 		p.handleReturns(mqChan)
 		p.listen(mqChan)
-	}
+		return time.Since(start), true
+	})
 }
 
 const dropReturnsAfter = 10 * time.Millisecond

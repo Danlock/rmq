@@ -54,3 +54,26 @@ type AMQP091Logger struct {
 func (l AMQP091Logger) Printf(format string, v ...interface{}) {
 	l.Log(l.Ctx, slog.LevelError, "rabbitmq/amqp091-go: "+fmt.Sprintf(format, v...))
 }
+
+const healthyLifetime = 20 * time.Millisecond
+
+// Retry attempts do repeatedly until it's ctx ends. If do returns false delayForAttempt is used to backoff retries.
+// If do is true and ran longer than healthyLifetime the backoff is reset. do returns it's own lifetime, since it may do some setup beforehand.
+func Retry(ctx context.Context, delayForAttempt func(int) time.Duration, do func(time.Duration) (time.Duration, bool)) {
+	var delay time.Duration
+	var attempt = 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+
+		delay = delayForAttempt(attempt)
+		attempt++
+		lifetime, ok := do(delay)
+		if ok && lifetime >= healthyLifetime {
+			delay, attempt = 0, 0
+		}
+	}
+}

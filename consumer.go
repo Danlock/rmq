@@ -76,14 +76,14 @@ func NewConsumer(rmqConn *Connection, config ConsumerArgs) *Consumer {
 // Closes the amqp.Channel on errors.
 func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, _ <-chan amqp.Delivery, err error) {
 	logPrefix := fmt.Sprintf("rmq.Consumer.safeDeclareAndConsume for queue %s", c.config.Queue.Name)
-	ctx, cancel := context.WithTimeout(ctx, c.config.AMQPTimeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, c.config.AMQPTimeout)
 	defer cancel()
 
-	mqChan, err := c.conn.Channel(ctx)
+	mqChan, err := c.conn.Channel(timeoutCtx)
 	if err != nil {
 		return nil, nil, fmt.Errorf(logPrefix+" failed to get a channel due to err %w", err)
 	}
-	// Network calls that don't take a context can block indefintely.
+	// Network calls that don't take a context can block indefinitely.
 	// Call them in a goroutine so we can timeout if necessary
 
 	respChan := make(chan internal.ChanResp[<-chan amqp.Delivery], 1)
@@ -91,7 +91,7 @@ func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, 
 	go func() {
 		var r internal.ChanResp[<-chan amqp.Delivery]
 		r.Val, r.Err = c.declareAndConsume(ctx, mqChan)
-		ctxDone := ctx.Err() != nil
+		ctxDone := timeoutCtx.Err() != nil
 		// Close the channel on errors or if the context times out, so the amqp channel isn't leaked
 		if r.Err != nil || ctxDone {
 			mqChanErr := mqChan.Close()
@@ -108,7 +108,7 @@ func (c *Consumer) safeDeclareAndConsume(ctx context.Context) (_ *amqp.Channel, 
 	}()
 
 	select {
-	case <-ctx.Done():
+	case <-timeoutCtx.Done():
 		return nil, nil, fmt.Errorf(logPrefix+" unable to complete before context did due to %w", context.Cause(ctx))
 	case r := <-respChan:
 		return mqChan, r.Val, r.Err
@@ -154,7 +154,9 @@ func (c *Consumer) declareAndConsume(ctx context.Context, mqChan *amqp.Channel) 
 		}
 	}
 
-	// https://github.com/rabbitmq/amqp091-go/pull/192 Channel.ConsumeWithContext doesn't hold up under scrutiny. The actual network call doesn't respect the passed in context.
+	// https://github.com/rabbitmq/amqp091-go/pull/192 Channel.ConsumeWithContext doesn't hold up under scrutiny. The actual network call (ch.call()) doesn't respect the passed in context.
+	// As of amqp091-go 1.9.0 it doesn't look like we can use ConsumeWithContext to timeout network calls, so we're stuck with this wrapper.
+	// Now ConsumeWithContext cancels itself when the context is finished, which seems unneccessary since callers can call Cancel, or in danlock/rmq, Close(), themselves.
 	deliveries, err := mqChan.ConsumeWithContext(
 		ctx,
 		c.config.Queue.Name,
@@ -179,29 +181,19 @@ func (c *Consumer) declareAndConsume(ctx context.Context, mqChan *amqp.Channel) 
 func (c *Consumer) Consume(ctx context.Context) <-chan amqp.Delivery {
 	outChan := make(chan amqp.Delivery)
 	go func() {
-		logPrefix := fmt.Sprintf("rmq.Consumer.Consume for queue (%s)", c.config.Queue.Name)
-		var delay time.Duration
-		attempt := 0
-		for {
-			select {
-			case <-ctx.Done():
-				close(outChan)
-				return
-			case <-time.After(delay):
-			}
+		internal.Retry(ctx, c.config.Delay, func(delay time.Duration) (time.Duration, bool) {
+			logPrefix := fmt.Sprintf("rmq.Consumer.Consume for queue (%s)", c.config.Queue.Name)
 			mqChan, inChan, err := c.safeDeclareAndConsume(ctx)
 			if err != nil {
-				delay = c.config.Delay(attempt)
-				attempt++
-				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to safeDeclareAndConsume. Retrying in %s due to %v", delay.String(), err)
-				continue
+				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to safeDeclareAndConsume, retrying in %s due to %v", delay.String(), err)
+				return 0, false
 			}
 
-			// Successfully redeclared our topology, so reset the backoff
-			delay, attempt = 0, 0
-
+			start := time.Now()
 			c.forwardDeliveries(ctx, mqChan, inChan, outChan)
-		}
+			return time.Since(start), true
+		})
+		close(outChan)
 	}()
 	return outChan
 }
@@ -224,6 +216,7 @@ func (c *Consumer) forwardDeliveries(ctx context.Context, mqChan *amqp.Channel, 
 			}
 		case msg, ok := <-inChan:
 			if !ok {
+				c.config.Log(ctx, slog.LevelDebug, logPrefix+" amqp.Channel.ConsumeWithContext channel closed")
 				return
 			}
 			// If the client never listens to outChan, this blocks forever
