@@ -1,7 +1,7 @@
 #! /usr/bin/make
 SHELL = /bin/bash
 BUILDTIME = $(shell date -u --rfc-3339=seconds)
-GITHASH = $(shell git describe --dirty --always --tags)
+GITHASH = $(shell git describe --dirty --always)
 GITCOMMITNO = $(shell git rev-list --all --count)
 SHORTBUILDTAG = v0.0.$(GITCOMMITNO)-$(GITHASH)
 BUILDINFO = Build Time:$(BUILDTIME)
