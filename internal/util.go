@@ -58,7 +58,7 @@ func (l AMQP091Logger) Printf(format string, v ...interface{}) {
 const healthyLifetime = 20 * time.Millisecond
 
 // Retry attempts do repeatedly until it's ctx ends. If do returns false delayForAttempt is used to backoff retries.
-// If do is true and ran longer than healthyLifetime the backoff is reset. do returns it's own lifetime, since it may do some setup beforehand.
+// If do is true and ran longer than healthyLifetime or it's last delay the backoff is reset. do returns it's own lifetime, since it may do some setup beforehand.
 func Retry(ctx context.Context, delayForAttempt func(int) time.Duration, do func(time.Duration) (time.Duration, bool)) {
 	var delay time.Duration
 	var attempt = 0
@@ -66,7 +66,7 @@ func Retry(ctx context.Context, delayForAttempt func(int) time.Duration, do func
 		delay = delayForAttempt(attempt)
 		attempt++
 		lifetime, ok := do(delay)
-		if ok && lifetime >= healthyLifetime {
+		if ok && lifetime >= max(healthyLifetime, delay) {
 			delay, attempt = 0, 0
 		}
 
