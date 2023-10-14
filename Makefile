@@ -46,9 +46,11 @@ update-readme-badge:
 	@go tool cover -func=$(COVERAGE_PATH) -o=$(COVERAGE_PATH).badge
 	@go run github.com/AlexBeauchemin/gobadge@v0.3.0 -filename=$(COVERAGE_PATH).badge
 
-# pkg.go.dev documentation is updated via go get
-update-proxy-cache:
-	@GOPROXY=https://proxy.golang.org go get -u github.com/danlock/rmq
+# pkg.go.dev documentation is updated via go get updating the google proxy
+update-godocs:
+	@cd ../regex-img; \
+	GOPROXY=https://proxy.golang.org go get -u github.com/danlock/rmq; \
+	go mod tidy
 
 release:
 	@$(MAKE) deps
