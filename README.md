@@ -49,16 +49,14 @@ cfg := rmq.Args{Log: slog.Log}
 rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectArgs{Args: cfg}, os.Getenv("AMQP_URL"), amqp.Config{})
 
 consCfg := 	rmq.ConsumerArgs{
-        Args: cfg,
-		Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
-		Qos: rmq.Qos{PrefetchCount: 1000},
+    Args: cfg,
+    Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
+    Qos: rmq.Qos{PrefetchCount: 1000},
 }
 
 rmq.NewConsumer(rmqConn, consCfg).ConsumeConcurrently(ctx, 100, func(ctx context.Context, msg amqp.Delivery) {
     process(msg)
-    if err := msg.Ack(false); err != nil {
-        handleErr(err)
-    }
+    handleAckErr(msg.Ack(false))
 })
 ```
 

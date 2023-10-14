@@ -14,7 +14,7 @@ import (
 
 // Exchange contains args for amqp.Channel.ExchangeDeclare
 type Exchange struct {
-	Name       string
+	Name       string // Name is required by ExchangeDeclare.
 	Kind       string // Kind is required by ExchangeDeclare. amqp091-go exports valid values like amqp.ExchangeDirect, etc
 	Durable    bool
 	AutoDelete bool

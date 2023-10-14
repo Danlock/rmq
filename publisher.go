@@ -92,6 +92,7 @@ func (p *Publisher) handleReturns(mqChan *amqp.Channel) {
 	notifyReturns := mqChan.NotifyReturn(make(chan amqp.Return))
 	go func() {
 		dropTimer := time.NewTimer(0)
+		<-dropTimer.C
 		for r := range notifyReturns {
 			if p.config.LogReturns {
 				// A Body can be arbitrarily large and/or contain sensitve info. Don't log it by default.
@@ -103,17 +104,17 @@ func (p *Publisher) handleReturns(mqChan *amqp.Channel) {
 			if p.config.NotifyReturn == nil {
 				continue
 			}
-			// Why is reusing a timer so bloody complicated... It's almost worth the timer leak just to reduce complexity
-			if !dropTimer.Stop() {
-				<-dropTimer.C
-			}
+
 			dropTimer.Reset(dropReturnsAfter)
 			// Try not to repeat streadway/amqp's mistake of deadlocking if a client isn't listening to their Notify* channel.
 			// (https://github.com/rabbitmq/amqp091-go/issues/18)
 			// If they aren't listening to p.config.NotifyReturn, just drop the amqp.Return instead of deadlocking and leaking goroutines
 			select {
 			case p.config.NotifyReturn <- r:
-				dropTimer.Stop()
+				// Why is reusing a timer so bloody complicated... It's almost worth the timer leak just to reduce complexity
+				if !dropTimer.Stop() {
+					<-dropTimer.C
+				}
 			case <-dropTimer.C:
 			}
 		}

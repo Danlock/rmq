@@ -51,11 +51,11 @@ update-proxy-cache:
 	@GOPROXY=https://proxy.golang.org go get github.com/danlock/rmq
 
 release:
+	@$(MAKE) deps
 ifeq ($(findstring dirty,$(SHORTBUILDTAG)),dirty)
 	@echo "Version $(SHORTBUILDTAG) is filthy, commit to clean it" && exit 1
 endif
 	@read -t 5 -p "$(SHORTBUILDTAG) will be the new released version. Hit enter to proceed, CTRL-C to cancel."
-	@$(MAKE) deps
 	@$(MAKE) test
 	@$(MAKE) bench
 	@git tag $(SHORTBUILDTAG)

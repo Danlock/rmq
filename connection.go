@@ -246,15 +246,19 @@ func (c *Connection) safeChannel(ctx context.Context, amqpConn AMQPConnection) (
 	go func() {
 		var resp internal.ChanResp[*amqp.Channel]
 		resp.Val, resp.Err = amqpConn.Channel()
-		respChan <- resp
+		// If our contexts timed out, close successfully created channels within this goroutine.
+		if resp.Err == nil && resp.Val != nil && (c.ctx.Err() != nil || ctx.Err() != nil) {
+			if err := resp.Val.Close(); err != nil && !errors.Is(err, amqp.ErrClosed) {
+				c.config.Log(ctx, slog.LevelError, logPrefix+" failed to close channel due to err: %+v", err)
+			}
+		} else {
+			respChan <- resp
+		}
 	}()
 
 	select {
-	case <-c.ctx.Done(): // Close the current amqp.Connection when rmq.Connection is shutting down
-		if err := amqpConn.CloseDeadline(time.Now().Add(c.config.AMQPTimeout)); err != nil && !errors.Is(err, amqp.ErrClosed) {
-			c.config.Log(c.ctx, slog.LevelError, logPrefix+" failed to close connection due to err: %+v", err)
-		}
-		return nil, fmt.Errorf(logPrefix+" unable to complete before %w", context.Cause(c.ctx))
+	case <-c.ctx.Done():
+		return nil, fmt.Errorf(logPrefix+" unable to complete before Connection %w", context.Cause(c.ctx))
 	case <-ctx.Done():
 		return nil, fmt.Errorf(logPrefix+" unable to complete before %w", context.Cause(ctx))
 	case resp := <-respChan:
