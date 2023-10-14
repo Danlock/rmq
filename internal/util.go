@@ -63,17 +63,17 @@ func Retry(ctx context.Context, delayForAttempt func(int) time.Duration, do func
 	var delay time.Duration
 	var attempt = 0
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(delay):
-		}
-
 		delay = delayForAttempt(attempt)
 		attempt++
 		lifetime, ok := do(delay)
 		if ok && lifetime >= healthyLifetime {
 			delay, attempt = 0, 0
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
 		}
 	}
 }
