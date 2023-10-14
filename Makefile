@@ -48,7 +48,7 @@ update-readme-badge:
 
 # pkg.go.dev documentation is updated via go get
 update-proxy-cache:
-	@GOPROXY=https://proxy.golang.org go get github.com/danlock/rmq
+	@GOPROXY=https://proxy.golang.org go get -u github.com/danlock/rmq
 
 release:
 	@$(MAKE) deps

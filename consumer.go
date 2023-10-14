@@ -154,8 +154,9 @@ func (c *Consumer) declareAndConsume(ctx context.Context, mqChan *amqp.Channel) 
 		}
 	}
 
-	// TODO: https://github.com/rabbitmq/amqp091-go/pull/192 has merged a Channel.ConsumeWithContext, which should be used here instead when we can
-	deliveries, err := mqChan.Consume(
+	// https://github.com/rabbitmq/amqp091-go/pull/192 Channel.ConsumeWithContext doesn't hold up under scrutiny. The actual network call doesn't respect the passed in context.
+	deliveries, err := mqChan.ConsumeWithContext(
+		ctx,
 		c.config.Queue.Name,
 		c.config.Consume.Consumer,
 		c.config.Consume.AutoAck,
