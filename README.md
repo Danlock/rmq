@@ -48,7 +48,7 @@ cfg := rmq.Args{Log: slog.Log}
 
 rmqConn := rmq.ConnectWithAMQPConfig(ctx, rmq.ConnectArgs{Args: cfg}, os.Getenv("AMQP_URL"), amqp.Config{})
 
-consCfg := 	rmq.ConsumerArgs{
+consCfg := rmq.ConsumerArgs{
     Args: cfg,
     Queue: rmq.Queue{Name: "q2d2", AutoDelete: true},
     Qos: rmq.Qos{PrefetchCount: 1000},
@@ -60,7 +60,27 @@ rmq.NewConsumer(rmqConn, consCfg).ConsumeConcurrently(ctx, 100, func(ctx context
 })
 ```
 
-Take a look at healthcheck_int_test.go for a more complete example.
+Creating an AMQP topology that is automatically applied on reconnections as seen in the Java and C# RabbitMQ client drivers.
+
+```
+ctx, := context.TODO()
+cfg := rmq.Args{Log: slog.Log}
+
+topology := rmq.Topology{
+    Args: cfg,
+    Exchanges:     []rmq.Exchange{{Name: "xchg", Kind: amqp.ExchangeDirect, AutoDelete: true}},
+    Queues:        []rmq.Queue{{Name: "huehue", Durable: true, AutoDelete: true}},
+    QueueBindings: []rmq.QueueBinding{{QueueName: "huehue", ExchangeName: "xchg"}},
+}
+
+// It may be desired to read your AMQP topology from disk as JSON or some other config format. rmq.Topology is a simple struct so it can be done like so.
+// err := json.NewDecoder(topologyFile).Decode(&topology)
+// topology.Args = cfg
+
+rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectArgs{Args: cfg, Topology: topology}, os.Getenv("AMQP_URL"))
+```
+
+Take a look at healthcheck_int_test.go for a more complete example of using all of danlock/rmq together.
 
 # Logging
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -61,15 +60,6 @@ func TestDeclareTopology(t *testing.T) {
 		}},
 	}
 
-	jsonTopologyString := `{
-		"Exchanges": [{"Name":"jsonXchg", "Kind": "topic", "AutoDelete": true}],
-		"Queues": [{"Name": "jsonQueue", "AutoDelete": true}]
-	}`
-	jsonTopology, err := rmq.ImportJSONTopology(strings.NewReader(jsonTopologyString))
-	if err != nil {
-		t.Fatalf("failed to ImportJSONTopology %v", err)
-	}
-
 	amqpConn, err := rmqConn.CurrentConnection(ctx)
 	if err != nil {
 		t.Fatalf("failed to CurrentConnection %v", err)
@@ -98,12 +88,6 @@ func TestDeclareTopology(t *testing.T) {
 			time.Millisecond,
 			baseTopology,
 			true,
-		},
-		{
-			"json success",
-			time.Minute,
-			jsonTopology,
-			false,
 		},
 	}
 	for _, tt := range tests {
