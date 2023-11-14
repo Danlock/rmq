@@ -17,14 +17,14 @@ import (
 )
 
 func TestHealthcheck(t *testing.T) {
-	Example()
+	Example_healthcheck()
 }
 
 // Example shows how to write an unsophisticated healthcheck for a service intending to ensure it's rmq.Connection is capable of processing messages.
 // Even though rmq.Connection reconnects on errors, there can always be unforeseen networking/DNS/RNGesus issues
 // that necessitate a docker/kubernetes healthcheck restarting the service when unhealthy.
 // While this is useful as an example, it wouldn't be used on production for several reasons, only one of which is the lack of reuse of AMQP connections and AMQP channels.
-func Example() {
+func Example_healthcheck() {
 	// Real applications should use a real context. If this healthcheck was called via HTTP request for example,
 	// that HTTP request's context would be a good candidate.
 	ctx, cancel := context.WithTimeout(context.TODO(), time.Minute)

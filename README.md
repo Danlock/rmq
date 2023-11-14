@@ -80,7 +80,7 @@ topology := rmq.Topology{
 rmqConn := rmq.ConnectWithURLs(ctx, rmq.ConnectArgs{Args: cfg, Topology: topology}, os.Getenv("AMQP_URL"))
 ```
 
-Take a look at healthcheck_int_test.go for a more complete example of using all of danlock/rmq together.
+Take a look at healthcheck_int_test.go for a more complete example of using all of danlock/rmq together, or hang_int_test.go for an example of danlock/rmq being more network-aware than amqp091-go.
 
 # Logging
 
