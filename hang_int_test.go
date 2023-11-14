@@ -105,7 +105,7 @@ func Example_hanging() {
 	}
 	chanDur := time.Since(chanStart)
 	// rmqConn is too paranoid to hang for 90% of hangTime, but double check anyway
-	if time.Since(chanStart) > (hangTime - (hangTime / 10)) {
+	if chanDur > (hangTime - (hangTime / 10)) {
 		log.Fatalf("rmqConn.Channel hung for (%s)", chanDur)
 	}
 }
