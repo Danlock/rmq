@@ -108,4 +108,6 @@ func Example_hanging() {
 	if chanDur > (hangTime - (hangTime / 10)) {
 		log.Fatalf("rmqConn.Channel hung for (%s)", chanDur)
 	}
+	// A caveat here is that rmqConn has leaked a goroutine that blocks until the connection sorts itself out.
+	// If amqp091-go ever fixes https://github.com/rabbitmq/amqp091-go/issues/225 then we can improve this situation.
 }

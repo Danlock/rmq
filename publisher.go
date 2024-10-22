@@ -282,7 +282,7 @@ func (p *Publisher) PublishUntilAcked(ctx context.Context, confirmTimeout time.D
 // resending if it's been longer than confirmTimeout or if they've been nacked.
 // confirmTimeout defaults to 1 minute. Recommended to call with context.WithTimeout.
 func (p *Publisher) PublishBatchUntilAcked(ctx context.Context, confirmTimeout time.Duration, pubs ...Publishing) error {
-	logPrefix := "rmq.Publisher.PublishBatchUntilConfirmed"
+	logPrefix := "rmq.Publisher.PublishBatchUntilAcked"
 
 	if len(pubs) == 0 {
 		return nil

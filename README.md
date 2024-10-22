@@ -13,7 +13,7 @@ This package attempts to provide a wrapper of useful features on top of amqp091,
 
 - Minimal API that doesn't get in the way of lower level access. The amqp091.Connection is there if you need it. amqp-091 knowledge is more transferable since danlock/rmq builds on top of those concepts rather than encapsulating things it doesn't need to.
 
-- Network aware message delivery. Infra can fail so danlock/rmq uses context.Context and default timeouts wherever possible.
+- Network aware message delivery. Networks fail so danlock/rmq uses context.Context and default timeouts wherever possible, and tries to redeliver across network failures, unlike amqp091-go.
 
 - One dependency (rabbitmq/amqp091-go).
 
@@ -21,7 +21,7 @@ This package attempts to provide a wrapper of useful features on top of amqp091,
 
 # Examples
 
-Using an AMQP publisher to publish a message with at least once delivery.
+Using an AMQP publisher to publish a message with at least once delivery, that retries for up to a minute on failures.
 
 ```
 ctx, cancel := context.WithTimeout(context.TODO(), time.Minute)
