@@ -97,3 +97,13 @@ Here is an example logrus wrapper. danlock/rmq only uses the predefined slog.Lev
         }
     }
 ```
+
+# TODO
+Benchmark against other Go amqp wrappers. Test if they implement timeouts or just block indefinitely on network errors.
+
+Candidates:
+AMQP-091
+https://github.com/wagslane/go-rabbitmq
+https://github.com/ThreeDotsLabs/watermill-amqp
+AMQP-1.0
+https://github.com/Azure/go-amqp

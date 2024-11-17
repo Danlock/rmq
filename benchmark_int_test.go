@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/danlock/rmq"
+	"github.com/danlock/rmq/internal/test"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/wagslane/go-rabbitmq"
+	wagslane "github.com/wagslane/go-rabbitmq"
 )
 
 const benchNumPubs = 1000
@@ -169,6 +172,133 @@ func BenchmarkPublishAndConsumeMany(b *testing.B) {
 		// 		}
 		// 	},
 		// },
+	}
+
+	for _, bb := range cases {
+		b.Run(bb.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				go func(i int) (err error) {
+					received := make(map[uint64]struct{}, len(publishings))
+					defer func() { errChan <- err }()
+					for {
+						select {
+						case msg := <-consumeChan:
+							rawIndex := bytes.Split(msg.Body, dot)[0]
+							index, err := strconv.ParseUint(string(rawIndex), 10, 64)
+							if err != nil {
+								return fmt.Errorf("strconv.ParseUint err %w", err)
+							}
+							received[index] = struct{}{}
+							if err := msg.Ack(false); err != nil {
+								return fmt.Errorf("msg.Ack err %w", err)
+							}
+							if len(received) == len(publishings) {
+								return nil
+							}
+						case <-ctx.Done():
+							return fmt.Errorf("timed out after consuming %d publishings on bench run %d", len(received), i)
+						}
+					}
+				}(i)
+
+				bb.publishFunc(b)
+
+				select {
+				case <-ctx.Done():
+					b.Fatalf("timed out on bench run %d", i)
+				case err := <-errChan:
+					if err != nil {
+						b.Fatalf("on bench run %d consumer err %v", i, err)
+
+					}
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkPublishAndConsumeManyWagslane(b *testing.B) {
+	setupStart := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	randSuffix := fmt.Sprintf("%d.%p", time.Now().UnixNano(), b)
+
+	queueName := "BenchmarkPublishAndConsumeManyWagslane" + randSuffix
+
+	conn, err := wagslane.NewConn(
+		os.Getenv("TEST_AMQP_URI"),
+		wagslane.WithConnectionOptionsLogging,
+	)
+	test.FailOnError(b, err)
+	defer conn.Close()
+
+	consumer, err := wagslane.NewConsumer(
+		conn,
+		queueName,
+		wagslane.WithConsumerOptionsQueueArgs(wagslane.Table{
+			amqp.QueueTTLArg: time.Minute.Milliseconds(),
+		}),
+	)
+	test.FailOnError(b, err)
+
+	defer consumer.Close()
+
+	consumeChan := make(chan wagslane.Delivery)
+	go func() {
+		err = consumer.Run(func(d wagslane.Delivery) rabbitmq.Action {
+			consumeChan <- d
+			return rabbitmq.Manual
+		})
+		test.FailOnError(b, err)
+	}()
+
+	dot := []byte(".")
+	errChan := make(chan error)
+
+	publishings := generatePublishings(1000, queueName)
+
+	publisher, err := wagslane.NewPublisher(
+		conn,
+		wagslane.WithPublisherOptionsLogging,
+		wagslane.WithPublisherOptionsConfirm,
+	)
+	test.FailOnError(b, err)
+	defer publisher.Close()
+
+	b.Logf("setup took %s", time.Since(setupStart))
+	cases := []struct {
+		name        string
+		publishFunc func(b *testing.B)
+	}{
+		{
+			"PublishBatchUntilAcked",
+			func(b *testing.B) {
+				// wagslane doesn't have a batch publisher, implement our own
+				toBeConfirmed := make([]wagslane.PublisherConfirmation, 0, len(publishings))
+				for _, p := range publishings {
+					c, err := publisher.PublishWithDeferredConfirmWithContext(
+						ctx,
+						p.Body,
+						[]string{p.RoutingKey},
+						wagslane.WithPublishOptionsMandatory,
+					)
+					test.FailOnError(b, err)
+					toBeConfirmed = append(toBeConfirmed, c)
+				}
+
+				for i, confirms := range toBeConfirmed {
+					if len(confirms) != 1 {
+						b.Fatalf("wagslane published a single message to a single routing key and got %d confirms somehow?", len(confirms))
+					}
+					acked, err := confirms[0].WaitContext(ctx)
+					test.FailOnError(b, err)
+					if !acked {
+						b.Errorf("wagslane published message %d got nacked", i)
+					}
+				}
+			},
+		},
 	}
 
 	for _, bb := range cases {
